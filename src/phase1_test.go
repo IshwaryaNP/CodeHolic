@@ -1,6 +1,7 @@
 package src
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,8 +10,10 @@ import (
 )
 
 // TestPhase1_TruncateAtEveryByteInsideLastBatch verifies that truncating the data file
-// at EVERY byte offset inside the last batch record results in a clean open(), all-or-nothing
-// batch semantics, correct key count, and writeOffset == file size.
+// at EVERY byte offset inside the last batch record results in:
+// (a) open() succeeds, all-or-nothing batch, key count and Get are correct.
+// (b) os.Stat(file).Size() == validEnd == writeOffset (proves on-disk truncate happened).
+// (c) Doing one Put of a new key, Close, reopen, asserts both pre-existing and new key are present.
 func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "base.db")
@@ -20,7 +23,6 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Write 5 base keys
 	for i := 0; i < 5; i++ {
 		k := fmt.Sprintf("base_k_%d", i)
 		v := fmt.Sprintf("base_v_%d", i)
@@ -30,7 +32,6 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 	}
 	baseSize := db.writeOffset
 
-	// Add batch of 3 keys
 	b := NewBatch()
 	_ = b.Put([]byte("batch_k_0"), []byte("batch_v_0"))
 	_ = b.Put([]byte("batch_k_1"), []byte("batch_v_1"))
@@ -45,7 +46,6 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 		t.Fatalf("Expected totalSize > baseSize, got totalSize=%d, baseSize=%d", totalSize, baseSize)
 	}
 
-	// Read entire original data file into memory
 	originalData, err := os.ReadFile(basePath)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
@@ -63,7 +63,7 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 			t.Fatalf("Offset %d: Open failed: %v", truncOffset, err)
 		}
 
-		// Assert file size matches writeOffset
+		// (a) Assert file size matches writeOffset == baseSize
 		fi, err := os.Stat(testPath)
 		if err != nil {
 			t.Fatalf("Offset %d: stat failed: %v", truncOffset, err)
@@ -75,12 +75,11 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 			t.Fatalf("Offset %d: expected writeOffset %d, got %d", truncOffset, baseSize, reopenedDB.writeOffset)
 		}
 
-		// Key count must be exactly 5 (batch completely absent)
+		// Key count must be exactly 5
 		if reopenedDB.index.Len() != 5 {
 			t.Fatalf("Offset %d: expected 5 keys, got %d", truncOffset, reopenedDB.index.Len())
 		}
 
-		// None of the batch keys should exist
 		for i := 0; i < 3; i++ {
 			bk := fmt.Sprintf("batch_k_%d", i)
 			if _, err := reopenedDB.Get([]byte(bk)); err != ErrNotFound {
@@ -88,7 +87,6 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 			}
 		}
 
-		// All 5 base keys must be intact
 		for i := 0; i < 5; i++ {
 			k := fmt.Sprintf("base_k_%d", i)
 			expectedV := fmt.Sprintf("base_v_%d", i)
@@ -101,17 +99,37 @@ func TestPhase1_TruncateAtEveryByteInsideLastBatch(t *testing.T) {
 			}
 		}
 
+		// (b) Write a new key, close, reopen, assert both pre-existing and new key are present
+		newKey := fmt.Sprintf("new_k_%d", truncOffset)
+		newVal := fmt.Sprintf("new_v_%d", truncOffset)
+		if err := reopenedDB.Put([]byte(newKey), []byte(newVal)); err != nil {
+			t.Fatalf("Offset %d: Put new key failed: %v", truncOffset, err)
+		}
 		_ = reopenedDB.Close()
+
+		reopened2, err := Open(testPath, nil)
+		if err != nil {
+			t.Fatalf("Offset %d: Reopen2 failed: %v", truncOffset, err)
+		}
+		if reopened2.index.Len() != 6 {
+			t.Fatalf("Offset %d: Expected 6 keys, got %d", truncOffset, reopened2.index.Len())
+		}
+		gotNewVal, err := reopened2.Get([]byte(newKey))
+		if err != nil || string(gotNewVal) != newVal {
+			t.Fatalf("Offset %d: New key %s mismatch: %v, %s", truncOffset, newKey, err, gotNewVal)
+		}
+		_ = reopened2.Close()
 	}
 }
 
-// TestPhase1_FlippedByteInBatchPayload verifies that bit flipping inside a batch payload
-// causes the entire batch to be discarded.
+// TestPhase1_FlippedByteInBatchPayload flips EVERY byte position of the last batch
+// and asserts open() succeeds, batch is discarded, earlier data is intact, and file size == validEnd.
+// Reports separately for positions inside the Begin record, middle records, and Commit record.
 func TestPhase1_FlippedByteInBatchPayload(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "flipped.db")
+	basePath := filepath.Join(dir, "flip_base.db")
 
-	db, err := Open(dbPath, nil)
+	db, err := Open(basePath, nil)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -119,44 +137,270 @@ func TestPhase1_FlippedByteInBatchPayload(t *testing.T) {
 	_ = db.Put([]byte("prior_key"), []byte("prior_val"))
 	baseSize := db.writeOffset
 
+	// Batch: Begin (15B), OpPut 1, OpPut 2, Commit (15B)
 	b := NewBatch()
 	_ = b.Put([]byte("batch_alpha"), []byte("payload_alpha_data_12345"))
 	_ = b.Put([]byte("batch_beta"), []byte("payload_beta_data_67890"))
 	if err := db.Write(b); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
+	totalSize := db.writeOffset
 	_ = db.Close()
 
-	data, err := os.ReadFile(dbPath)
+	originalData, err := os.ReadFile(basePath)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 
-	// Corrupt a byte in the payload of the first batch item (approx baseSize + 25)
-	flipIdx := baseSize + 25
-	data[flipIdx] ^= 0xFF
-	if err := os.WriteFile(dbPath, data, 0666); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
+	beginEnd := baseSize + HeaderSize
+	commitStart := totalSize - HeaderSize
+
+	counts := map[string]int{"begin": 0, "middle": 0, "commit": 0}
+
+	for flipOffset := baseSize; flipOffset < totalSize; flipOffset++ {
+		region := "middle"
+		if flipOffset < beginEnd {
+			region = "begin"
+		} else if flipOffset >= commitStart {
+			region = "commit"
+		}
+		counts[region]++
+
+		dataCopy := make([]byte, len(originalData))
+		copy(dataCopy, originalData)
+		dataCopy[flipOffset] ^= 0xAA // flip bits
+
+		testPath := filepath.Join(dir, fmt.Sprintf("test_flip_%d.db", flipOffset))
+		if err := os.WriteFile(testPath, dataCopy, 0666); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		reopenedDB, err := Open(testPath, nil)
+		if err != nil {
+			t.Fatalf("Offset %d (%s): Open failed: %v", flipOffset, region, err)
+		}
+
+		fi, err := os.Stat(testPath)
+		if err != nil {
+			t.Fatalf("Offset %d (%s): Stat failed: %v", flipOffset, region, err)
+		}
+
+		// Batch must be fully discarded
+		if reopenedDB.writeOffset != baseSize {
+			t.Fatalf("Offset %d (%s): expected writeOffset %d, got %d", flipOffset, region, baseSize, reopenedDB.writeOffset)
+		}
+		if fi.Size() != reopenedDB.writeOffset {
+			t.Fatalf("Offset %d (%s): file size %d != writeOffset %d", flipOffset, region, fi.Size(), reopenedDB.writeOffset)
+		}
+
+		// Prior key intact
+		v, err := reopenedDB.Get([]byte("prior_key"))
+		if err != nil || string(v) != "prior_val" {
+			t.Fatalf("Offset %d (%s): Prior key missing or corrupt: %v, %s", flipOffset, region, err, v)
+		}
+
+		// Batch keys absent
+		if _, err := reopenedDB.Get([]byte("batch_alpha")); err != ErrNotFound {
+			t.Fatalf("Offset %d (%s): batch_alpha survived corruption!", flipOffset, region)
+		}
+		if _, err := reopenedDB.Get([]byte("batch_beta")); err != ErrNotFound {
+			t.Fatalf("Offset %d (%s): batch_beta survived corruption!", flipOffset, region)
+		}
+
+		_ = reopenedDB.Close()
 	}
 
-	reopenedDB, err := Open(dbPath, nil)
+	t.Logf("Tested bit flips across all positions: Begin (%d bytes), Middle (%d bytes), Commit (%d bytes)",
+		counts["begin"], counts["middle"], counts["commit"])
+}
+
+// TestPhase1_TornTail_SinglePut_Delete_1MB verifies recovery for single Put (A2), single Delete (A6),
+// and a Put with a 1 MB value (A7) sampled at boundaries.
+func TestPhase1_TornTail_SinglePut_Delete_1MB(t *testing.T) {
+	dir := t.TempDir()
+
+	// A2: Single Put torn-tail
+	t.Run("SinglePut_A2", func(t *testing.T) {
+		p := filepath.Join(dir, "put_a2.db")
+		db, _ := Open(p, nil)
+		_ = db.Put([]byte("prior"), []byte("val"))
+		baseSize := db.writeOffset
+		_ = db.Put([]byte("target_put"), []byte("target_val_12345"))
+		totalSize := db.writeOffset
+		_ = db.Close()
+
+		data, _ := os.ReadFile(p)
+		for trunc := baseSize; trunc < totalSize; trunc++ {
+			pTrunc := filepath.Join(dir, fmt.Sprintf("put_a2_%d.db", trunc))
+			_ = os.WriteFile(pTrunc, data[:trunc], 0666)
+			r, err := Open(pTrunc, nil)
+			if err != nil {
+				t.Fatalf("Open failed at %d: %v", trunc, err)
+			}
+			if r.writeOffset != baseSize {
+				t.Fatalf("writeOffset %d != baseSize %d", r.writeOffset, baseSize)
+			}
+			if _, err := r.Get([]byte("target_put")); err != ErrNotFound {
+				t.Fatalf("target_put survived torn write at offset %d", trunc)
+			}
+			v, err := r.Get([]byte("prior"))
+			if err != nil || string(v) != "val" {
+				t.Fatalf("prior key corrupt")
+			}
+			_ = r.Close()
+		}
+	})
+
+	// A6: Single Delete torn-tail
+	t.Run("SingleDelete_A6", func(t *testing.T) {
+		p := filepath.Join(dir, "del_a6.db")
+		db, _ := Open(p, nil)
+		_ = db.Put([]byte("del_target"), []byte("should_be_kept_if_del_torn"))
+		baseSize := db.writeOffset
+		_ = db.Delete([]byte("del_target"))
+		totalSize := db.writeOffset
+		_ = db.Close()
+
+		data, _ := os.ReadFile(p)
+		for trunc := baseSize; trunc < totalSize; trunc++ {
+			pTrunc := filepath.Join(dir, fmt.Sprintf("del_a6_%d.db", trunc))
+			_ = os.WriteFile(pTrunc, data[:trunc], 0666)
+			r, err := Open(pTrunc, nil)
+			if err != nil {
+				t.Fatalf("Open failed at %d: %v", trunc, err)
+			}
+			if r.writeOffset != baseSize {
+				t.Fatalf("writeOffset %d != baseSize %d", r.writeOffset, baseSize)
+			}
+			// Because delete was torn, del_target MUST still exist with original value
+			v, err := r.Get([]byte("del_target"))
+			if err != nil || string(v) != "should_be_kept_if_del_torn" {
+				t.Fatalf("del_target missing or wrong at offset %d: %v, %s", trunc, err, v)
+			}
+			_ = r.Close()
+		}
+	})
+
+	// A7: Put with a 1 MB value sampled at boundaries
+	t.Run("LargeValue1MB_A7", func(t *testing.T) {
+		p := filepath.Join(dir, "large_a7.db")
+		db, _ := Open(p, nil)
+		_ = db.Put([]byte("prior"), []byte("prior_val"))
+		baseSize := db.writeOffset
+
+		oneMBVal := bytes.Repeat([]byte("A"), SpecMaxValueSize)
+		_ = db.Put([]byte("1mb_key"), oneMBVal)
+		totalSize := db.writeOffset
+		_ = db.Close()
+
+		data, _ := os.ReadFile(p)
+		offsets := make(map[int64]bool)
+
+		// First 20 bytes
+		for i := int64(0); i < 20 && baseSize+i < totalSize; i++ {
+			offsets[baseSize+i] = true
+		}
+		// Header boundary (HeaderSize = 15)
+		offsets[baseSize+int64(HeaderSize)] = true
+		offsets[baseSize+int64(HeaderSize)+int64(len("1mb_key"))] = true
+
+		// 20 points spread through the value
+		step := (totalSize - (baseSize + int64(HeaderSize))) / 21
+		for i := 1; i <= 20; i++ {
+			offsets[baseSize+int64(HeaderSize)+int64(i)*step] = true
+		}
+
+		// Last 20 bytes
+		for i := int64(0); i < 20; i++ {
+			off := totalSize - 1 - i
+			if off >= baseSize {
+				offsets[off] = true
+			}
+		}
+
+		for trunc := range offsets {
+			pTrunc := filepath.Join(dir, fmt.Sprintf("large_a7_%d.db", trunc))
+			_ = os.WriteFile(pTrunc, data[:trunc], 0666)
+			r, err := Open(pTrunc, nil)
+			if err != nil {
+				t.Fatalf("Open failed at %d: %v", trunc, err)
+			}
+			if r.writeOffset != baseSize {
+				t.Fatalf("Offset %d: writeOffset %d != baseSize %d", trunc, r.writeOffset, baseSize)
+			}
+			if _, err := r.Get([]byte("1mb_key")); err != ErrNotFound {
+				t.Fatalf("Offset %d: 1mb_key survived torn write", trunc)
+			}
+			v, err := r.Get([]byte("prior"))
+			if err != nil || string(v) != "prior_val" {
+				t.Fatalf("Offset %d: prior key corrupt", trunc)
+			}
+			_ = r.Close()
+		}
+	})
+}
+
+// TestPhase1_WriteFailureRollbackAndSubsequentWrite verifies that after an injected mid-write error
+// that triggers rollback (truncate + fsync), a subsequent write succeeds and is durable upon reopen.
+func TestPhase1_WriteFailureRollbackAndSubsequentWrite(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "inject_write_fail.db")
+
+	db, err := Open(dbPath, nil)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
-	defer reopenedDB.Close()
+	defer db.Close()
 
-	// Prior key must be intact
-	v, err := reopenedDB.Get([]byte("prior_key"))
-	if err != nil || string(v) != "prior_val" {
-		t.Fatalf("Prior key missing or corrupt: %v, %s", err, v)
+	_ = db.Put([]byte("k0"), []byte("v0"))
+	validOffset := db.writeOffset
+
+	// Use mockFailingFile from db_test.go
+	osFile := db.file.(*os.File)
+	mock := &mockFailingFile{
+		realFile:        osFile,
+		failWriteActive: true,
+		failWriteAfterN: 10, // fail mid-write on next record
+	}
+	db.file = mock
+
+	// Next Put will fail mid-write and trigger handleWriteFailure -> truncate + sync
+	err = db.Put([]byte("k1_failing"), []byte("this_value_will_fail_to_write_completely"))
+	if err == nil {
+		t.Fatalf("Expected write error, got nil")
 	}
 
-	// Batch keys must both be absent
-	if _, err := reopenedDB.Get([]byte("batch_alpha")); err != ErrNotFound {
-		t.Fatalf("batch_alpha survived payload corruption!")
+	// File must be rolled back to validOffset
+	if db.writeOffset != validOffset {
+		t.Fatalf("writeOffset %d != validOffset %d", db.writeOffset, validOffset)
 	}
-	if _, err := reopenedDB.Get([]byte("batch_beta")); err != ErrNotFound {
-		t.Fatalf("batch_beta survived payload corruption!")
+
+	// Deactivate failure injection
+	mock.failWriteActive = false
+
+	// Next Put must succeed
+	if err := db.Put([]byte("k2_success"), []byte("v2_val")); err != nil {
+		t.Fatalf("Subsequent Put failed: %v", err)
+	}
+	_ = db.Close()
+
+	// Reopen and assert both k0 and k2_success are present, k1_failing is absent
+	reopened, err := Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	if _, err := reopened.Get([]byte("k1_failing")); err != ErrNotFound {
+		t.Fatalf("Failed key found in database!")
+	}
+	v0, err := reopened.Get([]byte("k0"))
+	if err != nil || string(v0) != "v0" {
+		t.Fatalf("k0 corrupt: %v, %s", err, v0)
+	}
+	v2, err := reopened.Get([]byte("k2_success"))
+	if err != nil || string(v2) != "v2_val" {
+		t.Fatalf("k2_success corrupt: %v, %s", err, v2)
 	}
 }
 
@@ -197,7 +441,6 @@ func TestPhase1_BatchOrderLastOpWins(t *testing.T) {
 		t.Fatalf("Expected val_Y_final, got err: %v, val: %s", err, valY)
 	}
 
-	// Verify durability after reopen
 	_ = db.Close()
 	reopened, err := Open(dbPath, nil)
 	if err != nil {
@@ -241,7 +484,6 @@ func TestPhase1_10000OpBatchRoundTripAndKilledRecovery(t *testing.T) {
 	fullSize := db.writeOffset
 	_ = db.Close()
 
-	// 1. Reopen full 10k batch and verify
 	tOpen := time.Now()
 	reopened, err := Open(dbPath, nil)
 	if err != nil {
@@ -253,7 +495,6 @@ func TestPhase1_10000OpBatchRoundTripAndKilledRecovery(t *testing.T) {
 		t.Fatalf("Recovery exceeded 2s limit: took %v", openDur)
 	}
 
-	// Verify sample keys
 	val0, err := reopened.Get([]byte("k10_00000"))
 	if err != nil || string(val0) != "v10_00000" {
 		t.Fatalf("k10_00000 mismatch: %v, %s", err, val0)
@@ -264,7 +505,6 @@ func TestPhase1_10000OpBatchRoundTripAndKilledRecovery(t *testing.T) {
 	}
 	_ = reopened.Close()
 
-	// 2. Simulate killed 10,000-op batch: truncate the file halfway through the 10k batch
 	halfway := fullSize / 2
 	if err := os.Truncate(dbPath, halfway); err != nil {
 		t.Fatalf("Truncate failed: %v", err)
@@ -281,7 +521,6 @@ func TestPhase1_10000OpBatchRoundTripAndKilledRecovery(t *testing.T) {
 		t.Fatalf("Killed recovery exceeded 2s limit: took %v", killedDur)
 	}
 
-	// All 10,000 keys must be absent (all-or-nothing rollback)
 	if killedDB.index.Len() != 0 {
 		t.Fatalf("Expected 0 keys after uncommitted batch rollback, got %d", killedDB.index.Len())
 	}
@@ -303,7 +542,6 @@ func TestPhase1_CrashInRecoverySimulated(t *testing.T) {
 	validEnd := db.writeOffset
 	_ = db.Close()
 
-	// Append a torn record (half of a header)
 	f, err := os.OpenFile(dbPath, os.O_APPEND|os.O_WRONLY, 0666)
 	if err != nil {
 		t.Fatalf("OpenFile failed: %v", err)
@@ -311,7 +549,6 @@ func TestPhase1_CrashInRecoverySimulated(t *testing.T) {
 	_, _ = f.Write([]byte{0x01, 0x02, 0x03, 0x04, 0x05})
 	_ = f.Close()
 
-	// Recovery run 1
 	idx1, end1, err1 := Recover(dbPath)
 	if err1 != nil {
 		t.Fatalf("Recover 1 failed: %v", err1)
@@ -320,7 +557,6 @@ func TestPhase1_CrashInRecoverySimulated(t *testing.T) {
 		t.Fatalf("Recover 1 validEnd %d != %d", end1, validEnd)
 	}
 
-	// Recovery run 2 (simulating immediate crash & rerun)
 	idx2, end2, err2 := Recover(dbPath)
 	if err2 != nil {
 		t.Fatalf("Recover 2 failed: %v", err2)
@@ -332,7 +568,6 @@ func TestPhase1_CrashInRecoverySimulated(t *testing.T) {
 		t.Fatalf("Index len mismatch: %d vs %d", idx1.Len(), idx2.Len())
 	}
 
-	// Assert contents match
 	v1, ok1 := idx1.Get("valid1")
 	v2, ok2 := idx2.Get("valid1")
 	if !ok1 || !ok2 || v1 != v2 {
@@ -354,7 +589,6 @@ func TestPhase1_NestedAndOrphanBatchMarkers(t *testing.T) {
 	cleanEnd := db.writeOffset
 	_ = db.Close()
 
-	// Append an orphan BatchCommit marker
 	f, err := os.OpenFile(dbPath, os.O_APPEND|os.O_WRONLY, 0666)
 	if err != nil {
 		t.Fatalf("OpenFile failed: %v", err)

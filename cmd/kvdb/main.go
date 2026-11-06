@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bitcask/src"
@@ -23,9 +26,9 @@ Commands:
   batch <path> <file>          Applies put/del operations from file ("put k v" or "del k")
   dump <path>                  Prints every key and value, sorted by key ("<key>=<value>")
   check <path>                 Verifies file integrity, prints OK or a reason
-  serve <path>                 Reads ops from stdin ("put k v", "del k", "batch <file>", "compact", "import <file>"), prints ACK <id>
+  serve <path> [--max-bytes N] Reads ops from stdin, prints ACK/ERR to stdout
   compact <path>               Reclaims deleted and overwritten disk space
-  import <path> <file>         Bulk imports data (--format lines|csv|jsonl --chunk N --max-bytes N --on-error skip|abort --start-line L)`)
+  import <path> <file>         Bulk imports data (--format lines|csv|jsonl --chunk N --max-bytes N)`)
 }
 
 func main() {
@@ -80,6 +83,7 @@ func handleOpen(args []string) {
 	path := remaining[0]
 
 	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
 	if *maxBytes > 0 {
 		opts.MaxBytes = *maxBytes
 	}
@@ -104,7 +108,9 @@ func handlePut(args []string) {
 	}
 	path, key, val := args[0], args[1], args[2]
 
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
@@ -124,7 +130,8 @@ func handleGet(args []string) {
 	}
 	path, key := args[0], args[1]
 
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
@@ -150,7 +157,9 @@ func handleDel(args []string) {
 	}
 	path, key := args[0], args[1]
 
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
@@ -158,7 +167,7 @@ func handleDel(args []string) {
 	defer db.Close()
 
 	if err := db.Delete([]byte(key)); err != nil {
-		fmt.Fprintf(os.Stderr, "Delete error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Del error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -168,18 +177,20 @@ func handleBatch(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: kvdb batch <path> <file>")
 		os.Exit(1)
 	}
-	path, filePath := args[0], args[1]
+	path, batchFile := args[0], args[1]
 
-	f, err := os.Open(filePath)
+	f, err := os.Open(batchFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot read batch file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to open batch file: %v\n", err)
 		os.Exit(1)
 	}
 	defer f.Close()
 
 	b := src.NewBatch()
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
 	lineNum := 0
+
 	for scanner.Scan() {
 		lineNum++
 		line := strings.TrimSpace(scanner.Text())
@@ -216,7 +227,9 @@ func handleBatch(args []string) {
 		os.Exit(1)
 	}
 
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
@@ -299,45 +312,47 @@ func handleCheck(args []string) {
 		}
 
 		if _, err := ioReadFull(reader, hdrBuf[:]); err != nil {
-			fmt.Printf("FAIL: error reading header at offset %d: %v\n", offset, err)
+			fmt.Printf("FAIL: read error on header at offset %d: %v\n", offset, err)
 			os.Exit(1)
 		}
 
 		hdr, err := src.DecodeHeader(hdrBuf[:])
 		if err != nil {
-			fmt.Printf("FAIL: corrupt header at offset %d: %v\n", offset, err)
+			fmt.Printf("FAIL: invalid header at offset %d: %v\n", offset, err)
 			os.Exit(1)
 		}
 
 		if offset+int64(hdr.TotalLen) > fileSize {
-			fmt.Printf("FAIL: incomplete record at offset %d: record needs %d bytes, file has %d\n", offset, hdr.TotalLen, fileSize-offset)
+			fmt.Printf("FAIL: incomplete payload at offset %d: record length %d exceeds remaining bytes %d\n",
+				offset, hdr.TotalLen, fileSize-offset)
 			os.Exit(1)
 		}
 
-		payload := make([]byte, int(hdr.TotalLen)-src.HeaderSize)
-		if _, err := ioReadFull(reader, payload); err != nil {
-			fmt.Printf("FAIL: incomplete payload at offset %d: %v\n", offset, err)
+		keyValLen := int(hdr.TotalLen) - src.HeaderSize
+		keyValBuf := make([]byte, keyValLen)
+		if _, err := ioReadFull(reader, keyValBuf); err != nil {
+			fmt.Printf("FAIL: read error on payload at offset %d: %v\n", offset, err)
 			os.Exit(1)
 		}
 
-		key := payload[:hdr.KeyLen]
-		val := payload[hdr.KeyLen:]
+		kBytes := keyValBuf[:hdr.KeyLen]
+		vBytes := keyValBuf[hdr.KeyLen:]
 
-		if !src.VerifyCRC(hdrBuf[:], key, val) {
+		if !src.VerifyCRC(hdrBuf[:], kBytes, vBytes) {
 			fmt.Printf("FAIL: CRC mismatch at offset %d\n", offset)
 			os.Exit(1)
 		}
 
 		if hdr.OpType == src.OpBatchBegin {
 			if inBatch {
-				fmt.Printf("FAIL: nested BatchBegin at offset %d\n", offset)
+				fmt.Printf("FAIL: nested BatchBegin at offset %d inside batch from offset %d\n", recordStart, batchOffset)
 				os.Exit(1)
 			}
 			inBatch = true
 			batchOffset = recordStart
 		} else if hdr.OpType == src.OpBatchCommit {
 			if !inBatch {
-				fmt.Printf("FAIL: orphan BatchCommit at offset %d without BatchBegin\n", offset)
+				fmt.Printf("FAIL: orphan BatchCommit at offset %d without BatchBegin\n", recordStart)
 				os.Exit(1)
 			}
 			inBatch = false
@@ -366,6 +381,15 @@ func ioReadFull(r *bufio.Reader, buf []byte) (int, error) {
 	return total, nil
 }
 
+// decodeParam decodes a parameter that may be hex-encoded or plain string.
+// If hex.DecodeString succeeds, it returns the binary bytes; otherwise returns raw bytes.
+func decodeParam(s string) []byte {
+	if b, err := hex.DecodeString(s); err == nil && len(b) > 0 {
+		return b
+	}
+	return []byte(s)
+}
+
 func handleServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	maxBytes := fs.Int64("max-bytes", 0, "maximum permitted database file size in bytes")
@@ -379,6 +403,7 @@ func handleServe(args []string) {
 	path := remaining[0]
 
 	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
 	if *maxBytes > 0 {
 		opts.MaxBytes = *maxBytes
 	}
@@ -390,23 +415,31 @@ func handleServe(args []string) {
 	}
 	defer db.Close()
 
-	// Notify ready
+	var stdoutMu sync.Mutex
+	printACK := func(opID string) {
+		stdoutMu.Lock()
+		defer stdoutMu.Unlock()
+		fmt.Printf("ACK %s\n", opID)
+		_ = os.Stdout.Sync()
+	}
+	printERR := func(opID, reason string) {
+		stdoutMu.Lock()
+		defer stdoutMu.Unlock()
+		fmt.Printf("ERR %s %s\n", opID, reason)
+		_ = os.Stdout.Sync()
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
-	// Larger buffer for up to 1MB values
 	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
 
+	var wg sync.WaitGroup
+
 	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 
-		// Protocol:
-		// <op-id> put <key> <val>
-		// <op-id> del <key>
-		// <op-id> batch <file>
-		// <op-id> compact
 		parts := strings.SplitN(line, " ", 4)
 		if len(parts) < 2 {
 			continue
@@ -417,90 +450,156 @@ func handleServe(args []string) {
 		switch op {
 		case "put":
 			if len(parts) < 4 {
-				fmt.Fprintf(os.Stderr, "ERR %s put requires key and value\n", opID)
+				printERR(opID, "put requires key and value")
 				continue
 			}
-			k := parts[2]
-			v := parts[3]
-			if err := db.Put([]byte(k), []byte(v)); err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s put: %v\n", opID, err)
-			} else {
-				fmt.Printf("ACK %s\n", opID)
-				os.Stdout.Sync()
-			}
+			kBytes := decodeParam(parts[2])
+			vBytes := decodeParam(parts[3])
+
+			wg.Add(1)
+			go func(id string, k, v []byte) {
+				defer wg.Done()
+				if err := db.Put(k, v); err != nil {
+					printERR(id, err.Error())
+				} else {
+					printACK(id)
+				}
+			}(opID, kBytes, vBytes)
 
 		case "del":
 			if len(parts) < 3 {
-				fmt.Fprintf(os.Stderr, "ERR %s del requires key\n", opID)
+				printERR(opID, "del requires key")
 				continue
 			}
-			k := parts[2]
-			if err := db.Delete([]byte(k)); err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s del: %v\n", opID, err)
-			} else {
-				fmt.Printf("ACK %s\n", opID)
-				os.Stdout.Sync()
-			}
+			kBytes := decodeParam(parts[2])
+
+			wg.Add(1)
+			go func(id string, k []byte) {
+				defer wg.Done()
+				if err := db.Delete(k); err != nil {
+					printERR(id, err.Error())
+				} else {
+					printACK(id)
+				}
+			}(opID, kBytes)
 
 		case "batch":
 			if len(parts) < 3 {
-				fmt.Fprintf(os.Stderr, "ERR %s batch requires file path\n", opID)
+				printERR(opID, "batch requires count or file")
 				continue
 			}
-			batchFile := parts[2]
-			b, err := readBatchFile(batchFile)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s batch read: %v\n", opID, err)
-				continue
-			}
-			if err := db.Write(b); err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s batch write: %v\n", opID, err)
+
+			// Check if arg is an integer count <n> or a file path
+			count, parseErr := strconv.Atoi(parts[2])
+			if parseErr == nil && count >= 0 {
+				// Read n op lines atomically from scanner
+				var opLines []string
+				hasError := false
+				for i := 0; i < count; i++ {
+					if !scanner.Scan() {
+						printERR(opID, "unexpected EOF while reading batch op lines")
+						hasError = true
+						break
+					}
+					opLines = append(opLines, strings.TrimSpace(scanner.Text()))
+				}
+				if hasError {
+					continue
+				}
+
+				b := src.NewBatch()
+				buildErr := false
+				for _, opLine := range opLines {
+					if opLine == "" || strings.HasPrefix(opLine, "#") {
+						continue
+					}
+					opParts := strings.SplitN(opLine, " ", 3)
+					switch opParts[0] {
+					case "put":
+						if len(opParts) < 3 {
+							printERR(opID, fmt.Sprintf("bad batch put line: %s", opLine))
+							buildErr = true
+							break
+						}
+						bk := decodeParam(opParts[1])
+						bv := decodeParam(opParts[2])
+						if err := b.Put(bk, bv); err != nil {
+							printERR(opID, err.Error())
+							buildErr = true
+							break
+						}
+					case "del":
+						if len(opParts) < 2 {
+							printERR(opID, fmt.Sprintf("bad batch del line: %s", opLine))
+							buildErr = true
+							break
+						}
+						bk := decodeParam(opParts[1])
+						if err := b.Delete(bk); err != nil {
+							printERR(opID, err.Error())
+							buildErr = true
+							break
+						}
+					default:
+						printERR(opID, fmt.Sprintf("unknown op in batch: %s", opParts[0]))
+						buildErr = true
+						break
+					}
+					if buildErr {
+						break
+					}
+				}
+				if buildErr {
+					continue
+				}
+
+				wg.Add(1)
+				go func(id string, batchObj *src.Batch) {
+					defer wg.Done()
+					if err := db.Write(batchObj); err != nil {
+						printERR(id, err.Error())
+					} else {
+						printACK(id)
+					}
+				}(opID, b)
+
 			} else {
-				fmt.Printf("ACK %s\n", opID)
-				os.Stdout.Sync()
+				// Legacy file-based batch
+				batchFile := parts[2]
+				b, err := readBatchFile(batchFile)
+				if err != nil {
+					printERR(opID, err.Error())
+					continue
+				}
+
+				wg.Add(1)
+				go func(id string, batchObj *src.Batch) {
+					defer wg.Done()
+					if err := db.Write(batchObj); err != nil {
+						printERR(id, err.Error())
+					} else {
+						printACK(id)
+					}
+				}(opID, b)
 			}
 
 		case "compact":
-			if err := db.Compact(); err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s compact: %v\n", opID, err)
-			} else {
-				fmt.Printf("ACK %s\n", opID)
-				os.Stdout.Sync()
-			}
-
-		case "import":
-			if len(parts) < 3 {
-				fmt.Fprintf(os.Stderr, "ERR %s import requires file path\n", opID)
-				continue
-			}
-			importFilePath := parts[2]
-			impFile, err := os.Open(importFilePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s import file open: %v\n", opID, err)
-				continue
-			}
-			importOpts := src.ImportOptions{
-				Format:    src.FormatLines,
-				ChunkSize: 5000,
-				OnError:   src.OnErrorAbort,
-				OnChunk: func(chunkIdx, opsInChunk, totalCommittedOps, lastLine int) {
-					fmt.Printf("ACK %s chunk=%d ops=%d total=%d\n", opID, chunkIdx, opsInChunk, totalCommittedOps)
-					os.Stdout.Sync()
-				},
-			}
-			res, err := db.BulkImport(impFile, importOpts)
-			impFile.Close()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERR %s import failed: %v (chunks=%d, ops=%d)\n", opID, err, res.Chunks, res.OpsApplied)
-			} else {
-				fmt.Printf("ACK %s total_ops=%d\n", opID, res.OpsApplied)
-				os.Stdout.Sync()
-			}
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				if err := db.Compact(); err != nil {
+					printERR(id, err.Error())
+				} else {
+					printACK(id)
+				}
+			}(opID)
 
 		default:
-			fmt.Fprintf(os.Stderr, "ERR %s unknown op %s\n", opID, op)
+			printERR(opID, fmt.Sprintf("unknown op %s", op))
 		}
 	}
+
+	wg.Wait()
 }
 
 func readBatchFile(filePath string) (*src.Batch, error) {
@@ -548,7 +647,9 @@ func handleCompact(args []string) {
 		os.Exit(1)
 	}
 	path := args[0]
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
@@ -580,6 +681,7 @@ func handleImport(args []string) {
 	filePath := remaining[1]
 
 	opts := src.DefaultOptions()
+	opts.SyncPolicy = src.SyncAlways
 	if *maxBytes > 0 {
 		opts.MaxBytes = *maxBytes
 	}
@@ -605,7 +707,7 @@ func handleImport(args []string) {
 		OnError:   src.OnErrorAction(*onErrorStr),
 		OnChunk: func(chunkIdx, opsInChunk, totalCommittedOps, lastLine int) {
 			fmt.Printf("ACK chunk %d ops=%d total=%d last_line=%d\n", chunkIdx, opsInChunk, totalCommittedOps, lastLine)
-			os.Stdout.Sync()
+			_ = os.Stdout.Sync()
 		},
 	}
 
