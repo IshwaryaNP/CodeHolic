@@ -621,6 +621,56 @@ func TestCompaction_ConcurrencyUnderRace(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCompaction_ShrinkAfter1MPutsAndDeletes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 1M shrink test in short mode")
+	}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "shrink_1M.db")
+
+	db, err := Open(dbPath, &Options{SyncPolicy: SyncNever})
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	const count = 100_000 // fast & representative for unit tests (can be scaled)
+	for i := 0; i < count; i++ {
+		k := fmt.Sprintf("k_%08d", i)
+		if err := db.Put([]byte(k), []byte("dummy_value_data")); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+	for i := 0; i < count; i++ {
+		k := fmt.Sprintf("k_%08d", i)
+		if err := db.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete failed: %v", err)
+		}
+	}
+
+	sizeBefore := db.writeOffset
+	if sizeBefore == 0 {
+		t.Fatalf("expected non-zero size before compaction")
+	}
+
+	if err := db.Compact(); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	sizeAfter := fi.Size()
+
+	if sizeAfter >= sizeBefore {
+		t.Fatalf("expected file to shrink after deletes and compaction: before=%d, after=%d", sizeBefore, sizeAfter)
+	}
+	if sizeAfter != 0 {
+		t.Fatalf("expected 0 bytes remaining since all keys deleted, got %d", sizeAfter)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Benchmark: 1M Keys Recovery
 // -----------------------------------------------------------------------------
