@@ -199,11 +199,15 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 }
 
 // handleWriteFailure is called when a write or sync fails.
-// It attempts to roll back the file to writeOffsetBefore via Truncate.
-// If Truncate fails, the database is marked broken to avoid silent data corruption.
+// It attempts to roll back the file to writeOffsetBefore via Truncate and fsync.
+// If Truncate or Sync fails, the database is marked broken to avoid silent data corruption.
 // Precondition: caller holds db.mu Lock.
 func (db *DB) handleWriteFailure(writeOffsetBefore int64) {
 	if err := db.file.Truncate(writeOffsetBefore); err != nil {
+		db.broken = true
+		return
+	}
+	if err := db.file.Sync(); err != nil {
 		db.broken = true
 	}
 }
