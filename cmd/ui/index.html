@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bitcask Visualizer</title>
+<style>
+:root {
+  --bg: #f0f2f5; --panel: #fff; --border: #d0d7de; --text: #1f2328;
+  --muted: #656d76; --accent: #0969da; --put: #1a7f37; --del: #cf222e;
+  --batch: #6639ba; --dead: #8c959f; --live: #1a7f37;
+  --shadow: 0 1px 3px rgba(0,0,0,.12); --radius: 8px;
+  --bar-height: 52px; --log-height: 160px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --put: #3fb950; --del: #f85149;
+    --batch: #bc8cff; --dead: #484f58; --live: #3fb950;
+    --shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font: 13px/1.5 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* TOP BAR */
+#topbar { height: var(--bar-height); background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 12px; flex-shrink: 0; flex-wrap: wrap; }
+#topbar h1 { font-size: 15px; font-weight: 600; margin-right: 8px; white-space: nowrap; }
+.stat { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.stat strong { color: var(--text); }
+#dead-bar-wrap { flex: 1; min-width: 120px; max-width: 200px; }
+#dead-bar-bg { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+#dead-bar-fill { height: 100%; background: var(--del); border-radius: 4px; transition: width .4s; width: 0%; }
+.btn { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; font-size: 12px; white-space: nowrap; transition: background .15s; }
+.btn:hover { background: var(--border); }
+.btn-danger { border-color: var(--del); color: var(--del); }
+.btn-danger:hover { background: var(--del); color: #fff; }
+
+/* MAIN 3-PANEL */
+#main { display: flex; gap: 0; flex: 1; overflow: hidden; }
+.panel { display: flex; flex-direction: column; border-right: 1px solid var(--border); overflow: hidden; }
+.panel:last-child { border-right: none; }
+#left-panel { width: 280px; flex-shrink: 0; }
+#mid-panel { width: 300px; flex-shrink: 0; }
+#right-panel { flex: 1; }
+
+.panel-header { padding: 10px 14px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-shrink: 0; background: var(--panel); }
+.panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.tip { font-size: 11px; color: var(--muted); cursor: help; }
+.panel-body { flex: 1; overflow-y: auto; padding: 12px; background: var(--bg); }
+
+/* OPERATE */
+.field-group { margin-bottom: 10px; }
+.field-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+input[type=text] { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 13px; }
+input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+.btn-put { border-color: var(--put); color: var(--put); }
+.btn-put:hover { background: var(--put); color: #fff; }
+.btn-del2 { border-color: var(--del); color: var(--del); }
+.btn-del2:hover { background: var(--del); color: #fff; }
+#result-line { font-size: 12px; padding: 6px 8px; border-radius: 6px; min-height: 28px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); word-break: break-all; }
+#result-line.ok { color: var(--put); border-color: var(--put); }
+#result-line.err { color: var(--del); border-color: var(--del); }
+
+.section-sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.section-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+#batch-ops { list-style: none; margin-bottom: 8px; max-height: 100px; overflow-y: auto; }
+#batch-ops li { font-size: 11px; padding: 2px 0; color: var(--muted); }
+#batch-ops li span.put { color: var(--put); font-weight: 600; }
+#batch-ops li span.del { color: var(--del); font-weight: 600; }
+
+/* INDEX TABLE */
+#index-table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; padding: 6px 8px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 1; }
+td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-family: monospace; word-break: break-all; }
+tr.flash td { animation: flash .6s; }
+@keyframes flash { 0%,100%{background:transparent} 30%{background:color-mix(in srgb,var(--accent) 20%,transparent)} }
+
+/* FILE RECORDS */
+.record-block { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; padding: 8px 10px; font-size: 11px; font-family: monospace; background: var(--panel); position: relative; }
+.record-block.dead { opacity: .55; border-style: dashed; }
+.record-block.garbage { border-color: var(--del); background: color-mix(in srgb, var(--del) 8%, var(--bg)); }
+.record-block .rb-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.rb-offset { color: var(--muted); font-size: 10px; }
+.rb-op { font-weight: 700; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.rb-op.put { background: color-mix(in srgb,var(--put) 15%,transparent); color: var(--put); }
+.rb-op.del { background: color-mix(in srgb,var(--del) 15%,transparent); color: var(--del); }
+.rb-op.batch { background: color-mix(in srgb,var(--batch) 15%,transparent); color: var(--batch); }
+.rb-op.garbage { background: color-mix(in srgb,var(--del) 20%,transparent); color: var(--del); }
+.rb-tag { font-size: 10px; padding: 1px 5px; border-radius: 4px; font-weight: 600; }
+.rb-tag.live { background: color-mix(in srgb,var(--live) 15%,transparent); color: var(--live); }
+.rb-tag.dead { background: var(--border); color: var(--dead); }
+.rb-crc-ok { color: var(--put); font-size: 10px; }
+.rb-crc-bad { color: var(--del); font-size: 10px; font-weight: 700; }
+.rb-key { color: var(--accent); }
+.rb-val { color: var(--muted); }
+
+/* LOG */
+#log-wrap { height: var(--log-height); border-top: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; flex-shrink: 0; }
+#log-header { padding: 6px 14px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+#log-body { flex: 1; overflow-y: auto; padding: 6px 14px; }
+.log-entry { font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+.log-time { color: var(--muted); flex-shrink: 0; font-family: monospace; }
+.log-msg { word-break: break-all; }
+.log-msg.ok { color: var(--put); }
+.log-msg.err { color: var(--del); }
+.log-msg.info { color: var(--accent); }
+
+#refresh-spin { animation: spin .6s linear infinite; display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <h1>🗄️ Bitcask Visualizer</h1>
+  <span class="stat">File: <strong id="stat-size">—</strong></span>
+  <span class="stat">Live keys: <strong id="stat-live">—</strong></span>
+  <span class="stat">Dead: <strong id="stat-dead-pct">—</strong></span>
+  <div id="dead-bar-wrap" title="Dead bytes vs file size">
+    <div id="dead-bar-bg"><div id="dead-bar-fill"></div></div>
+  </div>
+  <svg id="refresh-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+  <button class="btn" onclick="doCompact()">⚡ Compact</button>
+  <button class="btn" onclick="doRestart()">🔄 Restart (Recover)</button>
+  <button class="btn btn-danger" onclick="doTornWrite()">💥 Torn Write</button>
+  <button class="btn btn-danger" onclick="doUncommittedBatch()">🔀 Uncommitted Batch</button>
+</div>
+
+<!-- 3-PANEL MAIN -->
+<div id="main">
+
+  <!-- LEFT: OPERATE -->
+  <div class="panel" id="left-panel">
+    <div class="panel-header">
+      <span class="panel-title">Operate</span>
+      <span class="tip" title="Write and read individual keys, or build an atomic batch of multiple operations.">ⓘ</span>
+    </div>
+    <div class="panel-body">
+      <div class="field-group">
+        <label>Key</label>
+        <input type="text" id="op-key" placeholder="e.g. user:1" />
+      </div>
+      <div class="field-group">
+        <label>Value</label>
+        <input type="text" id="op-val" placeholder="e.g. {&quot;name&quot;:&quot;Alice&quot;}" />
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-put" onclick="doPut()">Put</button>
+        <button class="btn" onclick="doGet()">Get</button>
+        <button class="btn btn-del2" onclick="doDelete()">Delete</button>
+      </div>
+      <div id="result-line">Ready.</div>
+
+      <hr class="section-sep">
+      <div class="section-label">Batch Builder</div>
+      <div class="field-group">
+        <label>Key</label>
+        <input type="text" id="batch-key" placeholder="batch key" />
+      </div>
+      <div class="field-group">
+        <label>Value (blank = delete)</label>
+        <input type="text" id="batch-val" placeholder="batch value" />
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-put" onclick="batchAdd('put')">+ Put</button>
+        <button class="btn btn-del2" onclick="batchAdd('delete')">+ Delete</button>
+      </div>
+      <ul id="batch-ops"></ul>
+      <div class="btn-row">
+        <button class="btn" style="border-color:var(--batch);color:var(--batch)" onclick="doCommitBatch()">✅ Commit Batch</button>
+        <button class="btn" onclick="batchClear()">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIDDLE: INDEX -->
+  <div class="panel" id="mid-panel">
+    <div class="panel-header">
+      <span class="panel-title">Index (RAM)</span>
+      <span class="tip" title="The in-memory hash map: each live key &rarr; byte offset of its latest Put record on disk. This is rebuilt from scratch on every Restart/Recover.">ⓘ</span>
+    </div>
+    <div class="panel-body" id="index-body">
+      <div id="index-table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Offset</th></tr></thead>
+          <tbody id="index-tbody"></tbody>
+        </table>
+      </div>
+      <p id="index-empty" style="color:var(--muted);font-size:12px;margin-top:8px">No keys yet.</p>
+    </div>
+  </div>
+
+  <!-- RIGHT: FILE RECORDS -->
+  <div class="panel" id="right-panel">
+    <div class="panel-header">
+      <span class="panel-title">File (disk)</span>
+      <span class="tip" title="Every record in the append-only log file, in disk order. Live = index points here. Dead = overwritten or deleted (still on disk until Compact).">ⓘ</span>
+    </div>
+    <div class="panel-body" id="records-body">
+      <p style="color:var(--muted);font-size:12px">No records yet.</p>
+    </div>
+  </div>
+</div>
+
+<!-- EVENT LOG -->
+<div id="log-wrap">
+  <div id="log-header">
+    Event Log
+    <button class="btn" style="font-size:10px;padding:2px 8px" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="log-body"></div>
+</div>
+
+<script>
+// ---- STATE ----
+let batchOps = [];
+let prevIndexKeys = new Set();
+
+// ---- HELPERS ----
+function fmt(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(2) + ' MB';
+}
+function ts() {
+  return new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+function log(msg, cls='') {
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML = `<span class="log-time">${ts()}</span><span class="log-msg ${cls}">${msg}</span>`;
+  const body = document.getElementById('log-body');
+  body.prepend(el);
+}
+function setResult(msg, cls='') {
+  const el = document.getElementById('result-line');
+  el.textContent = msg;
+  el.className = cls;
+}
+function spin(on) {
+  document.getElementById('refresh-spin').style.display = on ? 'inline' : 'none';
+}
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || JSON.stringify(j));
+  return j;
+}
+
+// ---- REFRESH UI ----
+async function refresh() {
+  spin(true);
+  try {
+    const [state, records] = await Promise.all([
+      api('GET', '/api/state'),
+      api('GET', '/api/records')
+    ]);
+    renderTopBar(state);
+    renderIndex(state.index || []);
+    renderRecords(records);
+  } catch(e) {
+    log('Refresh error: '+e.message, 'err');
+  } finally { spin(false); }
+}
+
+function renderTopBar(s) {
+  document.getElementById('stat-size').textContent = fmt(s.fileSize);
+  document.getElementById('stat-live').textContent = s.liveKeys;
+  const pct = s.deadPercent ? s.deadPercent.toFixed(1)+'%' : '0%';
+  document.getElementById('stat-dead-pct').textContent = pct;
+  document.getElementById('dead-bar-fill').style.width = Math.min(100, s.deadPercent||0).toFixed(1)+'%';
+}
+
+function renderIndex(entries) {
+  const tbody = document.getElementById('index-tbody');
+  const empty = document.getElementById('index-empty');
+  tbody.innerHTML = '';
+  if (!entries.length) { empty.style.display=''; return; }
+  empty.style.display = 'none';
+  const sorted = [...entries].sort((a,b) => a.offset - b.offset);
+  const curKeys = new Set(sorted.map(e=>e.key));
+  for (const e of sorted) {
+    const tr = document.createElement('tr');
+    const isNew = !prevIndexKeys.has(e.key);
+    tr.className = isNew ? 'flash' : '';
+    tr.innerHTML = `<td class="rb-key">${esc(e.key)}</td><td style="color:var(--muted)">${e.offset}</td>`;
+    tbody.appendChild(tr);
+  }
+  prevIndexKeys = curKeys;
+}
+
+function opName(op) {
+  if (op===1) return 'Put';
+  if (op===2) return 'Delete';
+  if (op===3) return 'BatchBegin';
+  if (op===4) return 'BatchCommit';
+  return 'Unknown('+op+')';
+}
+function opCls(op) {
+  if (op===1) return 'put';
+  if (op===2) return 'del';
+  if (op===3||op===4) return 'batch';
+  return '';
+}
+
+function renderRecords(data) {
+  const body = document.getElementById('records-body');
+  body.innerHTML = '';
+  const recs = data.records || [];
+  if (!recs.length && !data.tailGarbageBytes) {
+    body.innerHTML = '<p style="color:var(--muted);font-size:12px">No records yet.</p>';
+    return;
+  }
+  for (const r of recs) {
+    const div = document.createElement('div');
+    const dead = !r.live && (r.op===1||r.op===2);
+    div.className = 'record-block' + (dead ? ' dead' : '');
+    const liveTag = r.op===1 ? (r.live ? '<span class="rb-tag live">live &larr; index</span>' : '<span class="rb-tag dead">dead</span>') : '';
+    const crcBadge = r.crcOk ? '<span class="rb-crc-ok">&check; CRC</span>' : '<span class="rb-crc-bad">&cross; CRC BAD</span>';
+    const keyPart = r.key ? `<span class="rb-key">${esc(r.key)}</span>` : '<span style="color:var(--muted)">(no key)</span>';
+    const valPart = (r.op===1 && r.valuePreview) ? ` = <span class="rb-val">${esc(r.valuePreview)}${r.valueSize>40?'&hellip;':''}</span>` : '';
+    div.innerHTML = `
+      <div class="rb-header">
+        <span class="rb-offset">@${r.offset}</span>
+        <span class="rb-op ${opCls(r.op)}">${opName(r.op)}</span>
+        ${liveTag}
+        ${crcBadge}
+        <span style="color:var(--muted);font-size:10px">${r.length}B</span>
+      </div>
+      <div>${keyPart}${valPart}</div>`;
+    body.appendChild(div);
+  }
+  if (data.tailGarbageBytes > 0) {
+    const div = document.createElement('div');
+    div.className = 'record-block garbage';
+    div.innerHTML = `<div class="rb-header"><span class="rb-op garbage">GARBAGE</span><span class="rb-offset">@${data.tailOffset}</span></div><div style="color:var(--del)">${data.tailGarbageBytes} bytes of undecodable tail data</div>`;
+    body.appendChild(div);
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ---- OPERATIONS ----
+async function doPut() {
+  const key = document.getElementById('op-key').value.trim();
+  const val = document.getElementById('op-val').value;
+  if (!key) { setResult('Key is required.', 'err'); return; }
+  try {
+    await api('POST', '/api/put', {key, value: val});
+    setResult(`Put OK: ${key} = ${val}`, 'ok');
+    log(`Put <b>${esc(key)}</b> = "${esc(val)}"`, 'ok');
+    await refresh();
+  } catch(e) { setResult('Error: '+e.message, 'err'); log('Put failed: '+e.message, 'err'); }
+}
+async function doGet() {
+  const key = document.getElementById('op-key').value.trim();
+  if (!key) { setResult('Key is required.', 'err'); return; }
+  try {
+    const r = await api('GET', '/api/get?key='+encodeURIComponent(key));
+    setResult(`Get: ${key} = ${r.value}`, 'ok');
+    log(`Get <b>${esc(key)}</b> &rarr; "${esc(r.value)}"`, 'ok');
+  } catch(e) { setResult('Error: '+e.message, 'err'); log('Get failed: '+e.message, 'err'); }
+}
+async function doDelete() {
+  const key = document.getElementById('op-key').value.trim();
+  if (!key) { setResult('Key is required.', 'err'); return; }
+  try {
+    await api('POST', '/api/delete', {key});
+    setResult(`Deleted: ${key}`, 'ok');
+    log(`Delete <b>${esc(key)}</b>`, 'ok');
+    await refresh();
+  } catch(e) { setResult('Error: '+e.message, 'err'); log('Delete failed: '+e.message, 'err'); }
+}
+
+// ---- BATCH ----
+function batchAdd(op) {
+  const key = document.getElementById('batch-key').value.trim();
+  const val = document.getElementById('batch-val').value;
+  if (!key) { setResult('Batch key required.', 'err'); return; }
+  batchOps.push({op, key, value: val});
+  renderBatchList();
+  document.getElementById('batch-key').value = '';
+  document.getElementById('batch-val').value = '';
+}
+function renderBatchList() {
+  const ul = document.getElementById('batch-ops');
+  ul.innerHTML = batchOps.map(o=>`<li><span class="${o.op}">${o.op.toUpperCase()}</span> ${esc(o.key)}${o.op==='put'?' = '+esc(o.value):''}</li>`).join('');
+}
+function batchClear() { batchOps = []; renderBatchList(); }
+async function doCommitBatch() {
+  if (!batchOps.length) { setResult('No batch ops.', 'err'); return; }
+  try {
+    await api('POST', '/api/batch', {ops: batchOps});
+    log(`Batch committed: ${batchOps.length} op(s): `+batchOps.map(o=>`${o.op}(${esc(o.key)})`).join(', '), 'ok');
+    batchClear();
+    setResult('Batch committed!', 'ok');
+    await refresh();
+  } catch(e) { setResult('Batch error: '+e.message, 'err'); log('Batch failed: '+e.message, 'err'); }
+}
+
+// ---- TOP BAR ACTIONS ----
+async function doCompact() {
+  try {
+    const r = await api('POST', '/api/compact');
+    log(`Compact: ${fmt(r.fileSizeBefore)} &rarr; ${fmt(r.fileSizeAfter)} (saved ${fmt(r.fileSizeBefore-r.fileSizeAfter)}, ${r.deadRecordsRemoved} dead records removed)`, 'info');
+    await refresh();
+  } catch(e) { log('Compact failed: '+e.message, 'err'); }
+}
+async function doRestart() {
+  try {
+    const r = await api('POST', '/api/restart');
+    log(`Restart (Recover): ${fmt(r.fileSizeBefore)} &rarr; ${fmt(r.fileSizeAfter)}, truncated ${fmt(r.truncatedBytes)}, rebuilt ${r.keysAfter} keys in ${r.durationMs}ms`, 'info');
+    await refresh();
+  } catch(e) { log('Restart failed: '+e.message, 'err'); }
+}
+async function doTornWrite() {
+  const n = parseInt(prompt('Bytes of garbage to append (default 20):', '20')||'20', 10);
+  if (isNaN(n)||n<1) { log('Invalid byte count.', 'err'); return; }
+  try {
+    const r = await api('POST', '/api/crash/torn', {bytes: n});
+    log(`Torn write simulation: appended ${n}B garbage &rarr; recovery truncated ${fmt(r.truncatedBytes)}, ${r.keysAfter} keys remain in ${r.durationMs}ms`, 'err');
+    await refresh();
+  } catch(e) { log('Torn write failed: '+e.message, 'err'); }
+}
+async function doUncommittedBatch() {
+  try {
+    const r = await api('POST', '/api/crash/uncommitted-batch');
+    log(`Uncommitted batch simulation: recovery truncated ${fmt(r.truncatedBytes)}, ${r.keysAfter} keys remain (crash1..crash3 absent) in ${r.durationMs}ms`, 'err');
+    await refresh();
+  } catch(e) { log('Uncommitted batch failed: '+e.message, 'err'); }
+}
+function clearLog() { document.getElementById('log-body').innerHTML = ''; }
+
+// ---- INIT ----
+refresh();
+log('Bitcask Visualizer started. DB loaded.', 'info');
+</script>
+</body>
+</html>
+
