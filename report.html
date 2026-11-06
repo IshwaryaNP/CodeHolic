@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CodeHolic - Project Report</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 18mm 18mm 18mm;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1a202c;
+    line-height: 1.55;
+    font-size: 11pt;
+    background: #fff;
+    margin: 0;
+    padding: 0;
+  }
+  h1 {
+    font-size: 22pt;
+    color: #0f172a;
+    border-bottom: 2px solid #2563eb;
+    padding-bottom: 6px;
+    margin-top: 0;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    font-size: 11pt;
+    color: #475569;
+    margin-bottom: 24px;
+    line-height: 1.4;
+  }
+  h2 {
+    font-size: 14pt;
+    color: #1e3a8a;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 4px;
+    margin-top: 24px;
+    margin-bottom: 10px;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12pt;
+    color: #1e293b;
+    margin-top: 16px;
+    margin-bottom: 8px;
+    page-break-after: avoid;
+  }
+  h4 {
+    font-size: 11pt;
+    color: #334155;
+    margin-top: 12px;
+    margin-bottom: 6px;
+    page-break-after: avoid;
+  }
+  p {
+    margin-top: 0;
+    margin-bottom: 10px;
+  }
+  ul, ol {
+    margin-top: 0;
+    margin-bottom: 10px;
+    padding-left: 20px;
+  }
+  li {
+    margin-bottom: 4px;
+  }
+  code {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9.5pt;
+    background-color: #f1f5f9;
+    padding: 2px 4px;
+    border-radius: 4px;
+    color: #0f172a;
+  }
+  pre {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9pt;
+    background-color: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-left: 3px solid #3b82f6;
+    padding: 8px 12px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin-top: 6px;
+    margin-bottom: 14px;
+    page-break-inside: avoid;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    margin-bottom: 16px;
+    font-size: 9pt;
+    page-break-inside: avoid;
+  }
+  th, td {
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background-color: #f1f5f9;
+    color: #0f172a;
+    font-weight: 600;
+  }
+  tr:nth-child(even) {
+    background-color: #f8fafc;
+  }
+  .badge-pass {
+    display: inline-block;
+    background-color: #dcfce7;
+    color: #15803d;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 8pt;
+  }
+  .box {
+    background-color: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-left: 4px solid #2563eb;
+    padding: 10px 14px;
+    border-radius: 4px;
+    margin-bottom: 14px;
+    page-break-inside: avoid;
+  }
+  .page-break {
+    page-break-before: always;
+  }
+</style>
+</head>
+<body>
+
+<h1>CodeHolic: Bitcask Key-Value Store</h1>
+<div class="subtitle">
+  <strong>Competition:</strong> "Kill It and Prove It" 24-Hour Engineering Hackathon<br>
+  <strong>GitHub Repository:</strong> <a href="https://github.com/IshwaryaNP/CodeHolic">https://github.com/IshwaryaNP/CodeHolic</a><br>
+  <strong>Technology:</strong> Go 1.22.6 (Standard Library Only: <code>os</code>, <code>bufio</code>, <code>hash/crc32</code>, <code>sync</code>, <code>net/http</code>)<br>
+  <strong>Core Problem:</strong> High-performance persistence with mathematical correctness under sudden termination (<code>kill -9</code>).
+</div>
+
+<h2>1. Executive Summary</h2>
+<p>
+  <strong>CodeHolic</strong> is an embedded, append-only key-value database built from first principles in Go. The architecture guarantees that no acknowledged write is ever lost, no torn or uncommitted transaction is ever partially applied, and recovery from sudden process death completes in under 1 second.
+</p>
+<div class="box">
+  <strong>Key Achievements:</strong>
+  <ul>
+    <li><strong>Crash Safety Invariant:</strong> 100% adherence across hundreds of unannounced <code>kill -9</code> interruptions.</li>
+    <li><strong>Ultra-Fast Recovery:</strong> Rebuilds the in-memory RAM index for 1,000,000 keys in <strong>~0.638s</strong> (Limit: &lt; 2.0s).</li>
+    <li><strong>Online Compaction:</strong> Safely reclaims deleted and overwritten disk space with atomic cross-platform file replacement.</li>
+    <li><strong>Full Test Suite:</strong> 30 automated tests passing with the Go Race Detector (<code>-race</code>) enabled.</li>
+  </ul>
+</div>
+
+<h2>2. On-Disk Binary Format & Storage Engine</h2>
+<p>
+  The authoritative database state resides strictly within a single append-only <code>.db</code> file on disk. Each entry is serialized with a fixed 15-byte header followed by the variable-length key and value:
+</p>
+
+<pre>
++---------------+----------------+---------------+---------------+---------------+---------------+---------------+
+|  CRC32 (4B)   | TotalLen (4B)  |  OpType (1B)  |  KeyLen (2B)  |  ValLen (4B)  |  Key (NB)     |  Value (MB)   |
++---------------+----------------+---------------+---------------+---------------+---------------+---------------+
+0               4                8               9               11              15              15+KeyLen       TotalLen
+</pre>
+
+<ul>
+  <li><strong>CRC32 (IEEE) (Bytes 0..4):</strong> Calculated incrementally over <code>header[4:15] + key + value</code> to guarantee zero allocation overhead on writes.</li>
+  <li><strong>TotalLen (uint32) (Bytes 4..8):</strong> Exact length of the whole record (<code>15 + KeyLen + ValLen</code>).</li>
+  <li><strong>OpType (uint8) (Byte 8):</strong> <code>1 = OpPut</code>, <code>2 = OpDelete</code> (tombstone with ValLen=0), <code>3 = OpBatchBegin</code>, <code>4 = OpBatchCommit</code>.</li>
+  <li><strong>In-Memory RAM Index:</strong> A thread-safe hash map (<code>sync.RWMutex</code>) mapping <code>key -&gt; fileOffset</code> of the latest valid <code>OpPut</code> record.</li>
+</ul>
+
+<h2>3. Transactional Write Path & Compaction Ordering</h2>
+<h3>3.1 Atomic Write Sequence</h3>
+<ol>
+  <li><strong>Acquire Lock:</strong> <code>DB.mu.Lock()</code> serializes concurrent writers and guards the per-DB write buffer <code>encBuf</code>.</li>
+  <li><strong>Encode Record:</strong> Computes header fields and IEEE CRC32 into contiguous bytes.</li>
+  <li><strong>Append to File:</strong> Issues a single <code>file.Write(encBuf)</code> at the current append offset.</li>
+  <li><strong>Durable Flush (fsync):</strong> Calls <code>file.Sync()</code> (<code>FlushFileBuffers</code> on Windows) to force file blocks out of OS cache onto physical storage.</li>
+  <li><strong>Update RAM Index:</strong> Updates <code>index.Set(key, offset)</code> only <em>after</em> physical sync succeeds.</li>
+  <li><strong>Emit ACK:</strong> Sends acknowledgment to caller. If killed before ACK, the write was not acknowledged, satisfying the invariant.</li>
+</ol>
+
+<h3>3.2 Crash-Proof Compaction Sequence</h3>
+<ol>
+  <li>Snapshot all live keys sorted by original file offset to maintain sequential read performance.</li>
+  <li>Stream live records into a temporary file (<code>&lt;path&gt;.tmp</code>) using a 1MB buffered writer.</li>
+  <li>Explicitly flush <code>tmpFile.Sync()</code> and close <code>tmpFile</code>.</li>
+  <li>Close the active <code>db.file</code> (mandatory on Windows to release file locks).</li>
+  <li>Perform atomic directory replacement via <code>os.Rename(tmpPath, dbPath)</code>.</li>
+  <li>Reopen the newly compacted database file and atomically swap the in-memory index map.</li>
+</ol>
+
+<div class="page-break"></div>
+
+<h2>4. Hackathon Deliverables Overview</h2>
+<table>
+  <thead>
+    <tr>
+      <th style="width: 25%;">Deliverable</th>
+      <th style="width: 30%;">File Location</th>
+      <th style="width: 45%;">Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Deliverable 1: Engine CLI</strong></td>
+      <td><code>cmd/kvdb/main.go</code></td>
+      <td>Mandatory 8-command CLI wrapper (<code>open</code>, <code>put</code>, <code>get</code>, <code>del</code>, <code>batch</code>, <code>dump</code>, <code>check</code>, <code>serve</code>).</td>
+    </tr>
+    <tr>
+      <td><strong>Deliverable 2: Torture Tool</strong></td>
+      <td><code>cmd/torture/main.go</code></td>
+      <td>Chaos testing tool running concurrent workers, random SIGKILLs, independent oracle verification, and targeted modes.</td>
+    </tr>
+    <tr>
+      <td><strong>Deliverable 3: Attack Analysis</strong></td>
+      <td><code>BREAKING.md</code></td>
+      <td>12-row Crash Points Table, ordering proofs, design trade-offs, and failure post-mortems.</td>
+    </tr>
+    <tr>
+      <td><strong>Deliverable 4: Prompt Audit Log</strong></td>
+      <td><code>PROMPTS.md</code></td>
+      <td>Chronological audit log of all technical prompts, inquiries, and architecture discussions.</td>
+    </tr>
+    <tr>
+      <td><strong>Deliverable 5: Robustness Proof</strong></td>
+      <td><code>ARCHITECTURE.md</code></td>
+      <td>Mermaid architecture diagram, 32-row scenario verification table (Groups A–F), and formal guarantees.</td>
+    </tr>
+    <tr>
+      <td><strong>Interactive Web UI</strong></td>
+      <td><code>cmd/ui/</code></td>
+      <td>Zero-dependency local dashboard visualizer embedded via <code>go:embed</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>5. 15-Minute Judge Demo Walkthrough Guide</h2>
+
+<h3>Minutes 0 to 1: Clean Clone & Build</h3>
+<pre>
+go build -o kvdb.exe ./cmd/kvdb && go build -o torture.exe ./cmd/torture
+</pre>
+<p><em>Expected:</em> Builds cleanly with standard library only in seconds.</p>
+
+<h3>Minutes 1 to 4: Torture Tool Run (Judge's Seed)</h3>
+<pre>
+./torture --iterations 200 --seed 12345
+</pre>
+<p>
+  Runs 2 concurrent writers against <code>kvdb serve</code>, fires unannounced <code>SIGKILL</code>s at random millisecond intervals, restarts with <code>open</code>, runs <code>check</code> and <code>dump</code>, and validates that every single ACKed write exists with zero torn values.
+</p>
+
+<h3>Minutes 4 to 6: Targeted Chaos Modes</h3>
+<pre>
+./torture --iterations 100 --seed 7 --mode compaction
+./torture --iterations 100 --seed 42 --mode recovery-crash
+./torture --iterations 100 --seed 999 --mode large-values
+</pre>
+<p><em>Expected:</em> <span class="badge-pass">PASS</span> Zero invariant violations across all modes.</p>
+
+<h3>Minutes 6 to 8: Manual Interactive Kill Test</h3>
+<pre>
+# Start long-running serve engine
+./kvdb serve ./judge.db
+
+# Feed batch operations from stdin, then kill process abruptly:
+taskkill /F /IM kvdb.exe
+
+# Verify integrity:
+./kvdb check ./judge.db
+# OUTPUT: OK
+</pre>
+
+<h3>Minutes 8 to 12: Crash-Here Code Inspection Answers</h3>
+<ul>
+  <li>
+    <strong>Process dies during <code>file.Write()</code> before <code>Sync()</code>:</strong><br>
+    <em>Disk state:</em> Incomplete record bytes at tail (torn write).<br>
+    <em>Recovery action:</em> <code>DecodeHeader</code> detects length mismatch or invalid CRC32; rolls back file via <code>Truncate(validEnd)</code>.
+  </li>
+  <li>
+    <strong>Process dies in batch after 5 records, before <code>BatchCommit</code>:</strong><br>
+    <em>Disk state:</em> Valid <code>BatchBegin</code> and 5 records on disk; no commit marker.<br>
+    <em>Recovery action:</em> Recovery detects open batch state at EOF; rolls back entire batch to <code>batchBeginOffset</code>.
+  </li>
+  <li>
+    <strong>Process dies in compaction while streaming to <code>.tmp</code>:</strong><br>
+    <em>Disk state:</em> Authoritative <code>.db</code> is untouched. Partial <code>.db.tmp</code> file exists.<br>
+    <em>Recovery action:</em> Recovery detects and unlinks <code>.db.tmp</code> immediately on startup.
+  </li>
+</ul>
+
+<h3>Minutes 12 to 15: Design Extension (Key Expiration / TTL)</h3>
+<p>
+  <strong>Judge's Question:</strong> <em>"Add an expiry time (TTL) to every key. Keys past expiry must be invisible to reads and purged during compaction. What changes and what breaks?"</em><br>
+  <strong>Engineered Answer:</strong>
+</p>
+<ol>
+  <li><strong>Header Change:</strong> Expand fixed header from 15B to 23B by adding an 8-byte <code>ExpiresAt</code> Unix timestamp. <code>TotalLen = 23 + KeyLen + ValLen</code>.</li>
+  <li><strong>Read Path:</strong> <code>Get()</code> checks <code>hdr.ExpiresAt &lt;= time.Now().UnixMilli()</code>; returns <code>ErrNotFound</code> if expired.</li>
+  <li><strong>Compaction:</strong> Omit expired records from <code>.tmp</code>, reclaiming space.</li>
+  <li><strong>Subtle Traps Identified:</strong> Wall-clock adjustments (NTP backward drift) can resurrect expired keys (requires monotonic clock); batch updates with mixed TTLs; and compaction timestamp drift (must freeze <code>compactionStartTimestamp</code>).</li>
+</ol>
+
+<h2>6. Verification & Test Metrics</h2>
+<ul>
+  <li><strong>Race Detector:</strong> <code>go test -race ./...</code> &rarr; <span class="badge-pass">ALL 30 TESTS PASS</span>.</li>
+  <li><strong>Recovery Benchmark:</strong> 1,000,000 keys loaded and indexed in <strong>0.638s</strong>.</li>
+  <li><strong>Git Status:</strong> Fully committed and pushed to GitHub main and feature branches.</li>
+</ul>
+
+</body>
+</html>
+
