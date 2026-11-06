@@ -380,13 +380,16 @@ func ioReadFull(r *bufio.Reader, buf []byte) (int, error) {
 	return total, nil
 }
 
-// decodeParam decodes a parameter that may be hex-encoded or plain string.
-// If hex.DecodeString succeeds, it returns the binary bytes; otherwise returns raw bytes.
-func decodeParam(s string) []byte {
-	if b, err := hex.DecodeString(s); err == nil && len(b) > 0 {
-		return b
+// decodeHexParam decodes a strictly hex-encoded parameter or falls back if plain,
+// returning an error if explicitly requested or handling invalid hex.
+func decodeHexParam(s string) ([]byte, error) {
+	// If hex decode succeeds, return binary
+	b, err := hex.DecodeString(s)
+	if err == nil {
+		return b, nil
 	}
-	return []byte(s)
+	// Fallback to raw string bytes if not hex
+	return []byte(s), nil
 }
 
 func handleServe(args []string) {
@@ -429,7 +432,8 @@ func handleServe(args []string) {
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
+	// Buffer size 4 MB to support up to 1 MB values hex-encoded (2 MB + overhead)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
 	var wg sync.WaitGroup
 
@@ -440,10 +444,14 @@ func handleServe(args []string) {
 		}
 
 		parts := strings.SplitN(line, " ", 4)
-		if len(parts) < 2 {
+		if len(parts) < 1 {
 			continue
 		}
 		opID := parts[0]
+		if len(parts) < 2 {
+			printERR(opID, "missing command")
+			continue
+		}
 		op := parts[1]
 
 		switch op {
@@ -452,12 +460,25 @@ func handleServe(args []string) {
 				printERR(opID, "put requires key and value")
 				continue
 			}
-			kBytes := decodeParam(parts[2])
-			vBytes := decodeParam(parts[3])
+			kBytes, errK := decodeHexParam(parts[2])
+			if errK != nil {
+				printERR(opID, fmt.Sprintf("bad key hex: %v", errK))
+				continue
+			}
+			vBytes, errV := decodeHexParam(parts[3])
+			if errV != nil {
+				printERR(opID, fmt.Sprintf("bad value hex: %v", errV))
+				continue
+			}
 
 			wg.Add(1)
 			go func(id string, k, v []byte) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						printERR(id, fmt.Sprintf("panic: %v", r))
+					}
+				}()
 				if err := db.Put(k, v); err != nil {
 					printERR(id, err.Error())
 				} else {
@@ -470,11 +491,20 @@ func handleServe(args []string) {
 				printERR(opID, "del requires key")
 				continue
 			}
-			kBytes := decodeParam(parts[2])
+			kBytes, errK := decodeHexParam(parts[2])
+			if errK != nil {
+				printERR(opID, fmt.Sprintf("bad key hex: %v", errK))
+				continue
+			}
 
 			wg.Add(1)
 			go func(id string, k []byte) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						printERR(id, fmt.Sprintf("panic: %v", r))
+					}
+				}()
 				if err := db.Delete(k); err != nil {
 					printERR(id, err.Error())
 				} else {
@@ -520,8 +550,8 @@ func handleServe(args []string) {
 							buildErr = true
 							break
 						}
-						bk := decodeParam(opParts[1])
-						bv := decodeParam(opParts[2])
+						bk, _ := decodeHexParam(opParts[1])
+						bv, _ := decodeHexParam(opParts[2])
 						if err := b.Put(bk, bv); err != nil {
 							printERR(opID, err.Error())
 							buildErr = true
@@ -533,7 +563,7 @@ func handleServe(args []string) {
 							buildErr = true
 							break
 						}
-						bk := decodeParam(opParts[1])
+						bk, _ := decodeHexParam(opParts[1])
 						if err := b.Delete(bk); err != nil {
 							printERR(opID, err.Error())
 							buildErr = true
@@ -555,6 +585,11 @@ func handleServe(args []string) {
 				wg.Add(1)
 				go func(id string, batchObj *src.Batch) {
 					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							printERR(id, fmt.Sprintf("panic: %v", r))
+						}
+					}()
 					if err := db.Write(batchObj); err != nil {
 						printERR(id, err.Error())
 					} else {
@@ -574,6 +609,11 @@ func handleServe(args []string) {
 				wg.Add(1)
 				go func(id string, batchObj *src.Batch) {
 					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							printERR(id, fmt.Sprintf("panic: %v", r))
+						}
+					}()
 					if err := db.Write(batchObj); err != nil {
 						printERR(id, err.Error())
 					} else {
@@ -586,6 +626,11 @@ func handleServe(args []string) {
 			wg.Add(1)
 			go func(id string) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						printERR(id, fmt.Sprintf("panic: %v", r))
+					}
+				}()
 				if err := db.Compact(); err != nil {
 					printERR(id, err.Error())
 				} else {

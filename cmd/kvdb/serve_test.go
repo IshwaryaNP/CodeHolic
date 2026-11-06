@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -150,11 +151,113 @@ func TestCLI_ServeProtocolAndAtomicity(t *testing.T) {
 		t.Fatalf("Expected ERR for incomplete del, got %q", resp6)
 	}
 
+	send("opMissing")
+	respMissing := readResp()
+	if !strings.HasPrefix(respMissing, "ERR opMissing") {
+		t.Fatalf("Expected ERR for line with missing op, got %q", respMissing)
+	}
+
+	// Empty line should be skipped cleanly
+	send("")
+
 	// Ensure server is still alive after malformed inputs
 	send(fmt.Sprintf("op7 put %s %s", hex.EncodeToString([]byte("alive")), hex.EncodeToString([]byte("yes"))))
 	resp7 := readResp()
 	if resp7 != "ACK op7" {
 		t.Fatalf("Server died or failed after malformed input: %q", resp7)
+	}
+
+	// 5. Large 1 MB value hex-encoded (2 MB + overhead) through serve
+	oneMBVal := bytes.Repeat([]byte("X"), 1024*1024)
+	hexVal := hex.EncodeToString(oneMBVal)
+	send(fmt.Sprintf("opLarge put %s %s", hex.EncodeToString([]byte("large_k")), hexVal))
+	respLarge := readResp()
+	if respLarge != "ACK opLarge" {
+		t.Fatalf("Expected 'ACK opLarge' for 1MB value, got %q", respLarge)
+	}
+
+	// Verify large value via independent reopen
+	rdb3, err := src.Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Reopen for 1MB check failed: %v", err)
+	}
+	gotLarge, err := rdb3.Get([]byte("large_k"))
+	if err != nil || len(gotLarge) != len(oneMBVal) || gotLarge[0] != 'X' {
+		t.Fatalf("1MB value mismatch: len=%d, err=%v", len(gotLarge), err)
+	}
+	_ = rdb3.Close()
+}
+
+// TestCLI_ServeBatchEOFTruncation asserts that for a batch truncated by EOF (e.g. batch 5 with only 2 lines),
+// NOTHING from it is applied to the database.
+func TestCLI_ServeBatchEOFTruncation(t *testing.T) {
+	binPath := buildKVDBBinary(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve_batch_eof.db")
+
+	cmd := exec.Command(binPath, "serve", dbPath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd start: %v", err)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	writer := bufio.NewWriter(stdin)
+
+	// Send an initial baseline key
+	_, _ = writer.WriteString("opInit put " + hex.EncodeToString([]byte("baseline")) + " " + hex.EncodeToString([]byte("val0")) + "\n")
+	_ = writer.Flush()
+	if scanner.Scan() {
+		if scanner.Text() != "ACK opInit" {
+			t.Fatalf("Expected ACK opInit, got %s", scanner.Text())
+		}
+	}
+
+	// Send a batch header declaring 5 ops, but supply only 2 lines then close stdin (EOF)
+	_, _ = writer.WriteString("opTrunc batch 5\n")
+	_, _ = writer.WriteString("put " + hex.EncodeToString([]byte("should_not_exist_1")) + " " + hex.EncodeToString([]byte("val1")) + "\n")
+	_, _ = writer.WriteString("put " + hex.EncodeToString([]byte("should_not_exist_2")) + " " + hex.EncodeToString([]byte("val2")) + "\n")
+	_ = writer.Flush()
+	_ = stdin.Close() // EOF
+
+	// Must produce an ERR on stdout
+	gotErr := false
+	for scanner.Scan() {
+		txt := scanner.Text()
+		if strings.HasPrefix(txt, "ERR opTrunc") {
+			gotErr = true
+		}
+	}
+	_ = cmd.Wait()
+
+	if !gotErr {
+		t.Fatalf("Expected ERR opTrunc on unexpected EOF")
+	}
+
+	// Verify nothing from the truncated batch was applied
+	rdb, err := src.Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer rdb.Close()
+
+	if rdb.Snapshot()["should_not_exist_1"] != 0 {
+		t.Fatalf("should_not_exist_1 found in database!")
+	}
+	if rdb.Snapshot()["should_not_exist_2"] != 0 {
+		t.Fatalf("should_not_exist_2 found in database!")
+	}
+	vBase, err := rdb.Get([]byte("baseline"))
+	if err != nil || string(vBase) != "val0" {
+		t.Fatalf("baseline key corrupt: %v, %s", err, vBase)
 	}
 }
 
