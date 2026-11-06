@@ -33,12 +33,11 @@ func (db *DB) Put(key, val []byte) error {
 	// Calculate needed record length: HeaderSize + len(key) + len(val)
 	recordLen := int64(HeaderSize + len(key) + len(val))
 	if db.maxBytes > 0 && db.writeOffset+recordLen > db.maxBytes {
-		// Check if reclaimable space from stale/deleted records is sufficient
-		reclaimable := db.writeOffset - db.liveBytesLocked()
-		if reclaimable >= recordLen {
+		// If liveBytes + recordLen <= maxBytes, compaction can free enough space
+		if db.liveBytesLocked()+recordLen <= db.maxBytes {
 			c := &compactor{db: db}
 			if compErr := c.runLocked(); compErr == nil {
-				// Compaction succeeded; re-check against maxBytes once
+				// Compaction succeeded; re-check once
 				if db.writeOffset+recordLen > db.maxBytes {
 					return ErrDiskFull
 				}
@@ -107,7 +106,19 @@ func (db *DB) Delete(key []byte) error {
 
 	recordLen := int64(HeaderSize + len(key))
 	if db.maxBytes > 0 && db.writeOffset+recordLen > db.maxBytes {
-		return ErrDiskFull
+		// If liveBytes + recordLen <= maxBytes, compactLocked() once and retry once
+		if db.liveBytesLocked()+recordLen <= db.maxBytes {
+			c := &compactor{db: db}
+			if compErr := c.runLocked(); compErr == nil {
+				if db.writeOffset+recordLen > db.maxBytes {
+					return ErrDiskFull
+				}
+			} else {
+				return ErrDiskFull
+			}
+		} else {
+			return ErrDiskFull
+		}
 	}
 
 	writeOffsetBefore := db.writeOffset

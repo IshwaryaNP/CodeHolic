@@ -20,7 +20,10 @@ type compactor struct {
 	db           *DB
 	beforeWrite  func() error
 	beforeSync   func() error
+	beforeClose  func() error
 	beforeRename func() error
+	afterRename  func() error
+	beforeReopen func() error
 }
 
 type liveEntry struct {
@@ -183,6 +186,12 @@ func (c *compactor) runLocked() error {
 	}
 
 	// Close tmp file before renaming
+	if c.beforeClose != nil {
+		if err := c.beforeClose(); err != nil {
+			return fmt.Errorf("compaction beforeClose hook failed: %w", err)
+		}
+	}
+
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed closing tmp file: %w", err)
 	}
@@ -218,6 +227,23 @@ func (c *compactor) runLocked() error {
 
 	cleanupTmp = false
 
+	if c.afterRename != nil {
+		if err := c.afterRename(); err != nil {
+			// Rename succeeded so the new file is authoritative on disk!
+			// Update in-memory state to reflect the compacted file before returning error
+			c.db.index.Replace(newMap)
+			c.db.writeOffset = newOffset
+			// Try to reopen authoritative file
+			newF, openErr := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
+			if openErr != nil {
+				c.db.broken = true
+				return fmt.Errorf("%w: afterRename hook failed and reopening new file failed: %v", ErrCompactionFatal, openErr)
+			}
+			c.db.file = newF
+			return fmt.Errorf("compaction afterRename hook failed: %w", err)
+		}
+	}
+
 	// On Unix-like systems, fsync directory to guarantee durable directory entry metadata.
 	// On Windows, directories cannot be opened with standard os.OpenFile and will fail with Access Denied,
 	// so directory sync is skipped on Windows.
@@ -225,9 +251,22 @@ func (c *compactor) runLocked() error {
 		syncDir(c.db.path)
 	}
 
+	if c.beforeReopen != nil {
+		if err := c.beforeReopen(); err != nil {
+			// Rename succeeded: new file is authoritative
+			c.db.index.Replace(newMap)
+			c.db.writeOffset = newOffset
+			c.db.broken = true
+			return fmt.Errorf("%w: beforeReopen hook injected fatal reopen error: %v", ErrCompactionFatal, err)
+		}
+	}
+
 	// Reopen the newly compacted db.path
 	newF, err := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
 	if err != nil {
+		// Rename succeeded: swap in-memory index/offset, but mark DB broken since file handle failed
+		c.db.index.Replace(newMap)
+		c.db.writeOffset = newOffset
 		c.db.broken = true
 		return fmt.Errorf("%w: failed reopening compacted file: %v", ErrCompactionFatal, err)
 	}
