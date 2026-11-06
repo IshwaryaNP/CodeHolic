@@ -135,12 +135,14 @@ func TestPhase1_FlippedByteInBatchPayload(t *testing.T) {
 	}
 
 	_ = db.Put([]byte("prior_key"), []byte("prior_val"))
+	_ = db.Put([]byte("batch_to_delete"), []byte("delete_me_in_batch_later"))
 	baseSize := db.writeOffset
 
-	// Batch: Begin (15B), OpPut 1, OpPut 2, Commit (15B)
+	// Batch: Begin (15B), OpPut 1, OpDelete 1, OpPut 2, Commit (15B)
 	b := NewBatch()
-	_ = b.Put([]byte("batch_alpha"), []byte("payload_alpha_data_12345"))
-	_ = b.Put([]byte("batch_beta"), []byte("payload_beta_data_67890"))
+	_ = b.Put([]byte("batch_alpha"), []byte("payload_alpha_data_1234567890_extra_length"))
+	_ = b.Delete([]byte("batch_to_delete"))
+	_ = b.Put([]byte("batch_beta"), []byte("payload_beta_data_6789012345_extra_length"))
 	if err := db.Write(b); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -193,10 +195,14 @@ func TestPhase1_FlippedByteInBatchPayload(t *testing.T) {
 			t.Fatalf("Offset %d (%s): file size %d != writeOffset %d", flipOffset, region, fi.Size(), reopenedDB.writeOffset)
 		}
 
-		// Prior key intact
+		// Prior keys intact
 		v, err := reopenedDB.Get([]byte("prior_key"))
 		if err != nil || string(v) != "prior_val" {
 			t.Fatalf("Offset %d (%s): Prior key missing or corrupt: %v, %s", flipOffset, region, err, v)
+		}
+		vDel, err := reopenedDB.Get([]byte("batch_to_delete"))
+		if err != nil || string(vDel) != "delete_me_in_batch_later" {
+			t.Fatalf("Offset %d (%s): batch_to_delete was deleted despite corrupted batch: %v, %s", flipOffset, region, err, vDel)
 		}
 
 		// Batch keys absent
@@ -338,6 +344,109 @@ func TestPhase1_TornTail_SinglePut_Delete_1MB(t *testing.T) {
 			_ = r.Close()
 		}
 	})
+}
+
+// TestPhase1_WriteFailureOnExistingKeyPutDeleteBatch verifies that:
+// 1. Injected write failure during Put on an EXISTING key leaves Get returning OLD value,
+//    writeOffset unchanged, and index unchanged.
+// 2. Injected write failure during Delete leaves the key still present with old value,
+//    writeOffset unchanged, and index unchanged.
+// 3. Injected write failure during batch leaves none of its keys changed.
+func TestPhase1_WriteFailureOnExistingKeyPutDeleteBatch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "inject_existing_fail.db")
+
+	db, err := Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Put([]byte("target_put"), []byte("original_val")); err != nil {
+		t.Fatalf("init target_put failed: %v", err)
+	}
+	if err := db.Put([]byte("target_del"), []byte("delete_val")); err != nil {
+		t.Fatalf("init target_del failed: %v", err)
+	}
+	if err := db.Put([]byte("batch_k1"), []byte("old_batch_v1")); err != nil {
+		t.Fatalf("init batch_k1 failed: %v", err)
+	}
+
+	snapOffset := db.writeOffset
+	idxSnap := db.Snapshot()
+
+	osFile := db.file.(*os.File)
+	mock := &mockFailingFile{
+		realFile:        osFile,
+		failWriteActive: false,
+		failWriteAfterN: 0,
+	}
+	db.file = mock
+
+	// Case 1: Put on EXISTING key fails
+	mock.failWriteActive = true
+	mock.failWriteAfterN = 5 // fail mid-record
+	err = db.Put([]byte("target_put"), []byte("new_val_that_should_fail"))
+	if err == nil {
+		t.Fatalf("Expected Put on existing key to fail")
+	}
+	if db.writeOffset != snapOffset {
+		t.Fatalf("writeOffset changed after failed Put: %d != %d", db.writeOffset, snapOffset)
+	}
+	valPut, err := db.Get([]byte("target_put"))
+	if err != nil || string(valPut) != "original_val" {
+		t.Fatalf("target_put did not retain old value: %v, %s", err, valPut)
+	}
+	currSnap := db.Snapshot()
+	if currSnap["target_put"] != idxSnap["target_put"] {
+		t.Fatalf("target_put index offset changed: %d != %d", currSnap["target_put"], idxSnap["target_put"])
+	}
+
+	// Case 2: Delete on EXISTING key fails
+	mock.failWriteActive = true
+	mock.failWriteAfterN = 5
+	err = db.Delete([]byte("target_del"))
+	if err == nil {
+		t.Fatalf("Expected Delete on existing key to fail")
+	}
+	if db.writeOffset != snapOffset {
+		t.Fatalf("writeOffset changed after failed Delete: %d != %d", db.writeOffset, snapOffset)
+	}
+	valDel, err := db.Get([]byte("target_del"))
+	if err != nil || string(valDel) != "delete_val" {
+		t.Fatalf("target_del is missing or corrupt: %v, %s", err, valDel)
+	}
+	currSnap = db.Snapshot()
+	if currSnap["target_del"] != idxSnap["target_del"] {
+		t.Fatalf("target_del index offset changed: %d != %d", currSnap["target_del"], idxSnap["target_del"])
+	}
+
+	// Case 3: Batch modifying existing key and adding new key fails
+	mock.failWriteActive = true
+	mock.failWriteAfterN = 20
+	b := NewBatch()
+	_ = b.Put([]byte("batch_k1"), []byte("new_batch_v1"))
+	_ = b.Put([]byte("batch_k2"), []byte("new_batch_v2"))
+	_ = b.Delete([]byte("target_put"))
+	err = db.Write(b)
+	if err == nil {
+		t.Fatalf("Expected batch write to fail")
+	}
+	if db.writeOffset != snapOffset {
+		t.Fatalf("writeOffset changed after failed batch: %d != %d", db.writeOffset, snapOffset)
+	}
+	// Verify none of its keys changed
+	valB1, err := db.Get([]byte("batch_k1"))
+	if err != nil || string(valB1) != "old_batch_v1" {
+		t.Fatalf("batch_k1 changed despite batch write failure: %v, %s", err, valB1)
+	}
+	if _, err := db.Get([]byte("batch_k2")); err != ErrNotFound {
+		t.Fatalf("batch_k2 exists despite batch write failure")
+	}
+	valTargetPut, err := db.Get([]byte("target_put"))
+	if err != nil || string(valTargetPut) != "original_val" {
+		t.Fatalf("target_put was deleted despite batch write failure")
+	}
 }
 
 // TestPhase1_WriteFailureRollbackAndSubsequentWrite verifies that after an injected mid-write error
