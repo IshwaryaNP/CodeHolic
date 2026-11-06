@@ -1,0 +1,313 @@
+package main
+
+import (
+	"bufio"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"bitcask/src"
+)
+
+func buildKVDBBinary(t *testing.T) string {
+	binPath := filepath.Join(t.TempDir(), "kvdb_test.exe")
+	cmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build kvdb failed: %v, out: %s", err, string(out))
+	}
+	return binPath
+}
+
+// TestCLI_ServeProtocolAndAtomicity tests that:
+// 1. serve responds to put, del, batch <n>, and compact.
+// 2. ACK appears only after the data is visible via a second open.
+// 3. Malformed lines produce "ERR <id> <reason>" and never crash.
+// 4. Batch lines are read atomically before execution.
+func TestCLI_ServeProtocolAndAtomicity(t *testing.T) {
+	binPath := buildKVDBBinary(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve_test.db")
+
+	cmd := exec.Command(binPath, "serve", dbPath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd start: %v", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	writer := bufio.NewWriter(stdin)
+
+	send := func(line string) {
+		_, _ = writer.WriteString(line + "\n")
+		_ = writer.Flush()
+	}
+
+	readResp := func() string {
+		if scanner.Scan() {
+			return scanner.Text()
+		}
+		return ""
+	}
+
+	// 1. Put with hex encoding: key "k1" = 6b31, val "v1" = 7631
+	k1Hex := hex.EncodeToString([]byte("k1"))
+	v1Hex := hex.EncodeToString([]byte("v1"))
+	send(fmt.Sprintf("op1 put %s %s", k1Hex, v1Hex))
+	resp1 := readResp()
+	if resp1 != "ACK op1" {
+		t.Fatalf("Expected 'ACK op1', got %q", resp1)
+	}
+
+	// Verify durability via second open
+	rdb, err := src.Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Second open failed: %v", err)
+	}
+	gotVal, err := rdb.Get([]byte("k1"))
+	if err != nil || string(gotVal) != "v1" {
+		t.Fatalf("Second open did not see durable k1: %v, %s", err, gotVal)
+	}
+	_ = rdb.Close()
+
+	// 2. Batch <n>: op2 batch 3
+	// put k2 v2
+	// put k3 v3
+	// del k1
+	k2Hex := hex.EncodeToString([]byte("k2"))
+	v2Hex := hex.EncodeToString([]byte("v2"))
+	k3Hex := hex.EncodeToString([]byte("k3"))
+	v3Hex := hex.EncodeToString([]byte("v3"))
+
+	send("op2 batch 3")
+	send(fmt.Sprintf("put %s %s", k2Hex, v2Hex))
+	send(fmt.Sprintf("put %s %s", k3Hex, v3Hex))
+	send(fmt.Sprintf("del %s", k1Hex))
+
+	resp2 := readResp()
+	if resp2 != "ACK op2" {
+		t.Fatalf("Expected 'ACK op2', got %q", resp2)
+	}
+
+	// Second open confirms batch visibility
+	rdb2, err := src.Open(dbPath, nil)
+	if err != nil {
+		t.Fatalf("Second open 2 failed: %v", err)
+	}
+	if _, err := rdb2.Get([]byte("k1")); err != src.ErrNotFound {
+		t.Fatalf("Expected k1 to be deleted in batch")
+	}
+	val2, err := rdb2.Get([]byte("k2"))
+	if err != nil || string(val2) != "v2" {
+		t.Fatalf("k2 mismatch: %v, %s", err, val2)
+	}
+	val3, err := rdb2.Get([]byte("k3"))
+	if err != nil || string(val3) != "v3" {
+		t.Fatalf("k3 mismatch: %v, %s", err, val3)
+	}
+	_ = rdb2.Close()
+
+	// 3. Compact command
+	send("op3 compact")
+	resp3 := readResp()
+	if resp3 != "ACK op3" {
+		t.Fatalf("Expected 'ACK op3', got %q", resp3)
+	}
+
+	// 4. Malformed command tests
+	send("op4 unknown_op arg1")
+	resp4 := readResp()
+	if !strings.HasPrefix(resp4, "ERR op4") {
+		t.Fatalf("Expected ERR for unknown op, got %q", resp4)
+	}
+
+	send("op5 put incomplete")
+	resp5 := readResp()
+	if !strings.HasPrefix(resp5, "ERR op5") {
+		t.Fatalf("Expected ERR for incomplete put, got %q", resp5)
+	}
+
+	send("op6 del")
+	resp6 := readResp()
+	if !strings.HasPrefix(resp6, "ERR op6") {
+		t.Fatalf("Expected ERR for incomplete del, got %q", resp6)
+	}
+
+	// Ensure server is still alive after malformed inputs
+	send(fmt.Sprintf("op7 put %s %s", hex.EncodeToString([]byte("alive")), hex.EncodeToString([]byte("yes"))))
+	resp7 := readResp()
+	if resp7 != "ACK op7" {
+		t.Fatalf("Server died or failed after malformed input: %q", resp7)
+	}
+}
+
+// TestCLI_ServeConcurrentOps tests sending concurrent requests through serve stdin/stdout.
+func TestCLI_ServeConcurrentOps(t *testing.T) {
+	binPath := buildKVDBBinary(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve_concurrent.db")
+
+	cmd := exec.Command(binPath, "serve", dbPath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd start: %v", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	writer := bufio.NewWriter(stdin)
+
+	var writeMu sync.Mutex
+	sendLine := func(l string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, _ = writer.WriteString(l + "\n")
+		_ = writer.Flush()
+	}
+
+	totalOps := 50
+	expectedACKs := make(map[string]bool)
+	for i := 0; i < totalOps; i++ {
+		opID := fmt.Sprintf("c_%03d", i)
+		expectedACKs[opID] = true
+	}
+
+	// Concurrent dispatcher sending ops
+	var wg sync.WaitGroup
+	for i := 0; i < totalOps; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			opID := fmt.Sprintf("c_%03d", idx)
+			k := hex.EncodeToString([]byte(fmt.Sprintf("ck_%03d", idx)))
+			v := hex.EncodeToString([]byte(fmt.Sprintf("cv_%03d", idx)))
+			sendLine(fmt.Sprintf("%s put %s %s", opID, k, v))
+		}(i)
+	}
+	wg.Wait()
+
+	// Read all ACKs
+	receivedACKs := make(map[string]bool)
+	for len(receivedACKs) < totalOps {
+		if !scanner.Scan() {
+			t.Fatalf("Scanner finished prematurely with %d of %d ACKs", len(receivedACKs), totalOps)
+		}
+		txt := scanner.Text()
+		if strings.HasPrefix(txt, "ACK ") {
+			receivedACKs[strings.TrimPrefix(txt, "ACK ")] = true
+		} else {
+			t.Fatalf("Unexpected line received: %s", txt)
+		}
+	}
+
+	for opID := range expectedACKs {
+		if !receivedACKs[opID] {
+			t.Fatalf("Missing ACK for %s", opID)
+		}
+	}
+}
+
+// TestCLI_OutputFormats verifies all 8 commands: open, put, get, del, batch, dump, check, serve
+func TestCLI_OutputFormats(t *testing.T) {
+	binPath := buildKVDBBinary(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "cli_formats.db")
+
+	// 1. open: "Keys: %d, Recovery time: %v"
+	outOpen, err := exec.Command(binPath, "open", dbPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("open failed: %v, out: %s", err, string(outOpen))
+	}
+	if !strings.Contains(string(outOpen), "Keys: 0, Recovery time:") {
+		t.Fatalf("open format mismatch: %s", string(outOpen))
+	}
+
+	// 2. put
+	outPut, err := exec.Command(binPath, "put", dbPath, "z_key", "z_val").CombinedOutput()
+	if err != nil {
+		t.Fatalf("put failed: %v, out: %s", err, string(outPut))
+	}
+	outPut2, err := exec.Command(binPath, "put", dbPath, "a_key", "a_val").CombinedOutput()
+	if err != nil {
+		t.Fatalf("put 2 failed: %v, out: %s", err, string(outPut2))
+	}
+
+	// 3. get: prints value or NOTFOUND
+	outGet, err := exec.Command(binPath, "get", dbPath, "z_key").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(outGet)) != "z_val" {
+		t.Fatalf("get failed: %v, out: %s", err, string(outGet))
+	}
+	outGetNF, err := exec.Command(binPath, "get", dbPath, "nonexistent").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(outGetNF)) != "NOTFOUND" {
+		t.Fatalf("get NOTFOUND mismatch: %v, out: %s", err, string(outGetNF))
+	}
+
+	// 4. del
+	outDel, err := exec.Command(binPath, "del", dbPath, "z_key").CombinedOutput()
+	if err != nil {
+		t.Fatalf("del failed: %v, out: %s", err, string(outDel))
+	}
+	outGetDel, err := exec.Command(binPath, "get", dbPath, "z_key").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(outGetDel)) != "NOTFOUND" {
+		t.Fatalf("get after del mismatch: %v, out: %s", err, string(outGetDel))
+	}
+
+	// 5. batch <path> <file>
+	batchFile := filepath.Join(dir, "b.txt")
+	_ = os.WriteFile(batchFile, []byte("put b_k b_v\nput c_k c_v\n"), 0666)
+	outBatch, err := exec.Command(binPath, "batch", dbPath, batchFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("batch failed: %v, out: %s", err, string(outBatch))
+	}
+
+	// 6. dump: sorted by key, "<key>=<value>"
+	outDump, err := exec.Command(binPath, "dump", dbPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("dump failed: %v, out: %s", err, string(outDump))
+	}
+	lines := strings.Split(strings.TrimSpace(string(outDump)), "\n")
+	expectedLines := []string{"a_key=a_val", "b_k=b_v", "c_k=c_v"}
+	if len(lines) != len(expectedLines) {
+		t.Fatalf("dump line count mismatch: got %d, expected %d", len(lines), len(expectedLines))
+	}
+	for i := range lines {
+		if strings.TrimSpace(lines[i]) != expectedLines[i] {
+			t.Fatalf("dump line %d mismatch: got %s, expected %s", i, lines[i], expectedLines[i])
+		}
+	}
+
+	// 7. check: prints OK or reason
+	outCheck, err := exec.Command(binPath, "check", dbPath).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(outCheck)) != "OK" {
+		t.Fatalf("check failed: %v, out: %s", err, string(outCheck))
+	}
+}

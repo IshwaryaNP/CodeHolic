@@ -27,8 +27,7 @@ Commands:
   dump <path>                  Prints every key and value, sorted by key ("<key>=<value>")
   check <path>                 Verifies file integrity, prints OK or a reason
   serve <path> [--max-bytes N] Reads ops from stdin, prints ACK/ERR to stdout
-  compact <path>               Reclaims deleted and overwritten disk space
-  import <path> <file>         Bulk imports data (--format lines|csv|jsonl --chunk N --max-bytes N)`)
+  compact <path>               Reclaims deleted and overwritten disk space`)
 }
 
 func main() {
