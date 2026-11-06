@@ -76,4 +76,3 @@ func (idx *Index) Replace(m map[string]int64) {
 	}
 	idx.m = newM
 }
-

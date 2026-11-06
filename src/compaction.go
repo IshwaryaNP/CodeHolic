@@ -231,4 +231,3 @@ func syncDir(filePath string) {
 		_ = d.Close()
 	}
 }
-
