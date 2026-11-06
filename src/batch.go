@@ -113,6 +113,18 @@ func (db *DB) Write(b *Batch) error {
 		return ErrBroken
 	}
 
+	// Pre-check batch total size against MaxBytes with headroom
+	if db.maxBytes > 0 {
+		var estimatedBatchBytes int64 = HeaderSize * 2 // Begin + Commit
+		for _, op := range b.ops {
+			estimatedBatchBytes += int64(HeaderSize + len(op.key) + len(op.val))
+		}
+		headroom := int64(64 * 1024)
+		if db.writeOffset+estimatedBatchBytes+headroom > db.maxBytes {
+			return ErrDiskFull
+		}
+	}
+
 	writeOffsetBefore := db.writeOffset
 
 	// Reuse db.encBuf

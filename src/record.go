@@ -55,6 +55,7 @@ var (
 	ErrKeyTooLarge   = errors.New("key exceeds maximum allowed size")
 	ErrValueTooLarge = errors.New("value exceeds maximum allowed size")
 	ErrEmptyKey      = errors.New("key cannot be empty")
+	ErrDiskFull      = errors.New("disk full: write exceeds maximum permitted database file size")
 )
 
 // EncodeRecord appends an encoded record into dst and returns the modified slice.

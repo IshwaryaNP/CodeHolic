@@ -30,6 +30,16 @@ func (db *DB) Put(key, val []byte) error {
 		return ErrBroken
 	}
 
+	// Calculate needed record length: HeaderSize + len(key) + len(val)
+	recordLen := int64(HeaderSize + len(key) + len(val))
+	// Reserve headroom (at least 64KB or record size) so Delete operations and compaction still work at the cap.
+	if db.maxBytes > 0 {
+		headroom := int64(64 * 1024)
+		if db.writeOffset+recordLen+headroom > db.maxBytes {
+			return ErrDiskFull
+		}
+	}
+
 	writeOffsetBefore := db.writeOffset
 
 	// Reuse per-DB buffer guarded by write lock db.mu
@@ -83,6 +93,11 @@ func (db *DB) Delete(key []byte) error {
 	// If key is not in index, skip appending tombstone
 	if _, ok := db.index.Get(string(key)); !ok {
 		return nil
+	}
+
+	recordLen := int64(HeaderSize + len(key))
+	if db.maxBytes > 0 && db.writeOffset+recordLen > db.maxBytes {
+		return ErrDiskFull
 	}
 
 	writeOffsetBefore := db.writeOffset

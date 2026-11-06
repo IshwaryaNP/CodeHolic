@@ -37,12 +37,17 @@ const (
 type Options struct {
 	// SyncPolicy specifies the fsync persistence strategy. Default is SyncAlways.
 	SyncPolicy SyncPolicy
+
+	// MaxBytes specifies the maximum permitted size of the database file in bytes.
+	// 0 means unlimited.
+	MaxBytes int64
 }
 
 // DefaultOptions returns standard configuration with SyncAlways.
 func DefaultOptions() *Options {
 	return &Options{
 		SyncPolicy: SyncAlways,
+		MaxBytes:   0,
 	}
 }
 
@@ -57,6 +62,7 @@ type DB struct {
 	closed      bool
 	broken      bool
 	syncPolicy  SyncPolicy
+	maxBytes    int64
 
 	// encBuf is a reusable per-DB byte buffer for encoding records,
 	// guarded by DB.mu (Write lock) to avoid allocations on writes.
@@ -88,6 +94,7 @@ func Open(path string, opts *Options) (*DB, error) {
 		closed:      false,
 		broken:      false,
 		syncPolicy:  opts.SyncPolicy,
+		maxBytes:    opts.MaxBytes,
 		encBuf:      make([]byte, 0, 4096),
 	}
 

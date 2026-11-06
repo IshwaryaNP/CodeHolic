@@ -73,18 +73,19 @@ func handleOpen(args []string) {
 	}
 	path := remaining[0]
 
+	opts := src.DefaultOptions()
+	if *maxBytes > 0 {
+		opts.MaxBytes = *maxBytes
+	}
+
 	t0 := time.Now()
-	db, err := src.Open(path, src.DefaultOptions())
+	db, err := src.Open(path, opts)
 	dur := time.Since(t0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-
-	if *maxBytes > 0 {
-		// Enforce or record max bytes configuration if supported
-	}
 
 	snap := db.Snapshot()
 	fmt.Printf("Keys: %d, Recovery time: %v\n", len(snap), dur)
@@ -360,13 +361,23 @@ func ioReadFull(r *bufio.Reader, buf []byte) (int, error) {
 }
 
 func handleServe(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: kvdb serve <path>")
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	maxBytes := fs.Int64("max-bytes", 0, "maximum permitted database file size in bytes")
+	_ = fs.Parse(args)
+
+	remaining := fs.Args()
+	if len(remaining) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: kvdb serve <path> [--max-bytes N]")
 		os.Exit(1)
 	}
-	path := args[0]
+	path := remaining[0]
 
-	db, err := src.Open(path, src.DefaultOptions())
+	opts := src.DefaultOptions()
+	if *maxBytes > 0 {
+		opts.MaxBytes = *maxBytes
+	}
+
+	db, err := src.Open(path, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
 		os.Exit(1)
