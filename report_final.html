@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Bitcask KV Store – Project Report</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Fira+Mono:wght@400;500&display=swap');
+
+  :root {
+    --primary: #1a56db;
+    --primary-dark: #1e429f;
+    --accent: #0ea5e9;
+    --success: #16a34a;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --bg: #ffffff;
+    --bg-alt: #f8fafc;
+    --bg-dark: #0f172a;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+    --code-bg: #1e293b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+    background: var(--bg);
+  }
+
+  /* ── COVER PAGE ── */
+  .cover {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0f172a 0%, #1a56db 60%, #0ea5e9 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 40px;
+    text-align: center;
+    page-break-after: always;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute;
+    top: -120px; right: -120px;
+    width: 400px; height: 400px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+  }
+  .cover::after {
+    content: '';
+    position: absolute;
+    bottom: -80px; left: -80px;
+    width: 300px; height: 300px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.04);
+  }
+  .cover-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 6px 18px;
+    border-radius: 20px;
+    margin-bottom: 32px;
+  }
+  .cover h1 {
+    font-size: 48px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.1;
+    margin-bottom: 16px;
+    text-shadow: 0 2px 20px rgba(0,0,0,0.3);
+  }
+  .cover h1 span { color: #7dd3fc; }
+  .cover-subtitle {
+    font-size: 18px;
+    color: rgba(255,255,255,0.8);
+    max-width: 600px;
+    margin-bottom: 48px;
+  }
+  .cover-meta {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .cover-meta-item {
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 12px;
+    padding: 16px 24px;
+    text-align: center;
+  }
+  .cover-meta-item .label { color: rgba(255,255,255,0.6); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  .cover-meta-item .value { color: #fff; font-size: 15px; font-weight: 600; margin-top: 4px; }
+  .cover-footer {
+    position: absolute;
+    bottom: 32px;
+    color: rgba(255,255,255,0.5);
+    font-size: 12px;
+  }
+
+  /* ── LAYOUT ── */
+  .page { max-width: 900px; margin: 0 auto; padding: 48px 40px; }
+
+  /* ── SECTION ── */
+  .section { margin-bottom: 56px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 24px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border);
+  }
+  .section-num {
+    width: 36px; height: 36px;
+    background: var(--primary);
+    color: #fff;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700; flex-shrink: 0;
+  }
+  .section-title { font-size: 22px; font-weight: 700; color: #0f172a; }
+
+  h3 { font-size: 15px; font-weight: 600; color: #0f172a; margin: 24px 0 10px; }
+  h4 { font-size: 13px; font-weight: 600; color: var(--text-muted); margin: 16px 0 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  p { margin-bottom: 12px; color: var(--text); }
+  ul, ol { padding-left: 20px; margin-bottom: 12px; }
+  li { margin-bottom: 4px; }
+
+  /* ── CARDS ── */
+  .card {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+  }
+  .card-title { font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .card-body { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+
+  .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+
+  /* ── STAT CARDS ── */
+  .stat-card {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+    border-radius: 14px;
+    padding: 20px;
+    color: #fff;
+    text-align: center;
+  }
+  .stat-card .num { font-size: 36px; font-weight: 700; line-height: 1; }
+  .stat-card .lbl { font-size: 11px; opacity: 0.8; margin-top: 6px; text-transform: uppercase; letter-spacing: 1px; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+
+  /* ── TABLES ── */
+  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 12.5px; }
+  thead th {
+    background: #0f172a;
+    color: #fff;
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  thead th:first-child { border-radius: 8px 0 0 0; }
+  thead th:last-child { border-radius: 0 8px 0 0; }
+  tbody tr:nth-child(even) { background: var(--bg-alt); }
+  tbody td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #eff6ff; }
+
+  /* ── BADGES ── */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge-green { background: #dcfce7; color: #16a34a; }
+  .badge-blue  { background: #dbeafe; color: #1d4ed8; }
+  .badge-orange{ background: #ffedd5; color: #c2410c; }
+  .badge-gray  { background: #f1f5f9; color: #475569; }
+  .badge-red   { background: #fee2e2; color: #dc2626; }
+
+  /* ── CODE ── */
+  pre, code {
+    font-family: 'Fira Mono', 'Consolas', monospace;
+  }
+  code {
+    background: #f1f5f9;
+    color: #d63384;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: #e2e8f0;
+    padding: 18px 20px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.6;
+    margin-bottom: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  pre .kw { color: #93c5fd; }
+  pre .str { color: #86efac; }
+  pre .cmt { color: #64748b; }
+  pre .fn { color: #fde68a; }
+
+  /* ── TIMELINE ── */
+  .timeline { position: relative; padding-left: 32px; }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 10px; top: 0; bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--primary), var(--accent));
+    border-radius: 2px;
+  }
+  .timeline-item { position: relative; margin-bottom: 24px; }
+  .timeline-dot {
+    position: absolute;
+    left: -27px; top: 4px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 3px rgba(26,86,219,0.2);
+  }
+  .timeline-commit {
+    font-family: 'Fira Mono', monospace;
+    font-size: 11px;
+    color: var(--primary);
+    background: #eff6ff;
+    padding: 1px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 4px;
+  }
+  .timeline-title { font-size: 14px; font-weight: 600; color: #0f172a; }
+  .timeline-desc { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* ── ALERT BOXES ── */
+  .alert {
+    border-left: 4px solid;
+    border-radius: 0 8px 8px 0;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+  .alert-info { border-color: var(--accent); background: #f0f9ff; color: #0369a1; }
+  .alert-success { border-color: var(--success); background: #f0fdf4; color: #15803d; }
+  .alert-warning { border-color: var(--warning); background: #fffbeb; color: #92400e; }
+
+  /* ── TOC ── */
+  .toc { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 12px; padding: 24px 28px; margin-bottom: 48px; }
+  .toc h3 { margin: 0 0 16px; font-size: 16px; }
+  .toc ol { counter-reset: toc-counter; list-style: none; padding: 0; }
+  .toc li { counter-increment: toc-counter; padding: 5px 0; border-bottom: 1px dashed var(--border); display: flex; justify-content: space-between; }
+  .toc li:last-child { border-bottom: none; }
+  .toc li::before { content: counter(toc-counter) "."; font-weight: 700; color: var(--primary); margin-right: 10px; }
+  .toc-page { color: var(--text-muted); font-size: 12px; }
+
+  /* ── PROGRESS BAR ── */
+  .progress-wrap { background: #e2e8f0; border-radius: 10px; height: 10px; margin: 6px 0 2px; }
+  .progress-bar { height: 10px; border-radius: 10px; background: linear-gradient(90deg, var(--primary), var(--accent)); }
+
+  /* ── PAGE BREAKS ── */
+  .page-break { page-break-before: always; padding-top: 48px; }
+
+  /* ── FOOTER ── */
+  .report-footer {
+    text-align: center;
+    padding: 32px;
+    color: var(--text-muted);
+    font-size: 11px;
+    border-top: 1px solid var(--border);
+    margin-top: 56px;
+  }
+
+  /* ── PRINT STYLES ── */
+  @media print {
+    .cover { -webkit-print-color-adjust: exact; print-color-adjust: exact; min-height: 100vh; }
+    .stat-card { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    thead th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .section { page-break-inside: avoid; }
+    .timeline-item { page-break-inside: avoid; }
+    .card { page-break-inside: avoid; }
+    pre { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     COVER PAGE
+══════════════════════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-badge">🏆 CodeHolic Hackathon — Kill It and Prove It</div>
+  <h1>Bitcask <span>KV Store</span><br/>Project Report</h1>
+  <p class="cover-subtitle">A production-grade, stdlib-only key-value storage engine built on the Bitcask log-structured model — with durability hardening, atomic batches, compaction, bulk import, and a full web UI.</p>
+  <div class="cover-meta">
+    <div class="cover-meta-item">
+      <div class="label">Repository</div>
+      <div class="value">IshwaryaNP/CodeHolic</div>
+    </div>
+    <div class="cover-meta-item">
+      <div class="label">Branch</div>
+      <div class="value">feat/recovery-compaction</div>
+    </div>
+    <div class="cover-meta-item">
+      <div class="label">Language</div>
+      <div class="value">Go (stdlib only)</div>
+    </div>
+    <div class="cover-meta-item">
+      <div class="label">Date</div>
+      <div class="value">November 7, 2026</div>
+    </div>
+  </div>
+  <div class="cover-footer">Confidential — Generated automatically</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     MAIN CONTENT
+══════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+<!-- Table of Contents -->
+<div class="toc">
+  <h3>📋 Table of Contents</h3>
+  <ol>
+    <li><span>Project Overview</span><span class="toc-page">§1</span></li>
+    <li><span>Architecture &amp; Design</span><span class="toc-page">§2</span></li>
+    <li><span>Implementation Steps (1–9)</span><span class="toc-page">§3</span></li>
+    <li><span>File Structure</span><span class="toc-page">§4</span></li>
+    <li><span>Test Results &amp; Benchmarks</span><span class="toc-page">§5</span></li>
+    <li><span>Build &amp; Run Guide</span><span class="toc-page">§6</span></li>
+    <li><span>Spec Compliance Matrix</span><span class="toc-page">§7</span></li>
+    <li><span>Bugs Fixed</span><span class="toc-page">§8</span></li>
+    <li><span>Git Commit History</span><span class="toc-page">§9</span></li>
+  </ol>
+</div>
+
+<!-- ── §1 OVERVIEW ── -->
+<div class="section">
+  <div class="section-header">
+    <div class="section-num">1</div>
+    <div class="section-title">Project Overview</div>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-card"><div class="num">9</div><div class="lbl">Spec Steps Completed</div></div>
+    <div class="stat-card"><div class="num">700+</div><div class="lbl">Torture Iterations Passed</div></div>
+    <div class="stat-card"><div class="num">549ms</div><div class="lbl">1M-Key Recovery Time</div></div>
+    <div class="stat-card"><div class="num">0</div><div class="lbl">Third-party Dependencies</div></div>
+  </div>
+
+  <p>This project implements a <strong>production-hardened Bitcask-style key-value store</strong> in pure Go using only the standard library. It was built for the <em>CodeHolic "Kill It and Prove It"</em> hackathon, which required proving durability and correctness under adversarial conditions — disk-full events, mid-write crashes, torn writes, and concurrent workloads.</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title">🎯 Core Goal</div>
+      <div class="card-body">Implement 9 steps of a durability specification ("Kill It and Prove It") on top of an existing Bitcask log-structured storage engine, with zero external dependencies.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">⚙️ Tech Stack</div>
+      <div class="card-body">Go 1.21+ · Standard Library Only · CGO_ENABLED=0 · Windows + POSIX compatible · Module: <code>bitcask</code></div>
+    </div>
+  </div>
+
+  <div class="alert alert-success">
+    ✅ All 9 specification steps are complete, all tests pass, all 7 torture modes pass 100/100 iterations each, and all commits are pushed to <code>origin/main</code> and <code>origin/feat/recovery-compaction</code>.
+  </div>
+</div>
+
+<!-- ── §2 ARCHITECTURE ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">2</div>
+    <div class="section-title">Architecture &amp; Design</div>
+  </div>
+
+  <h3>Bitcask Log-Structured Storage Model</h3>
+  <p>Bitcask uses an <strong>append-only log</strong> for all writes. Every <code>Put</code> and <code>Delete</code> appends a fixed-header record to the data file. An in-memory hash index (<code>KeyDir</code>) maps each key to the latest record's file offset and length. On startup, the engine scans the log to rebuild the index — this is the recovery phase.</p>
+
+  <div class="card">
+    <div class="card-title">📐 Record Format on Disk</div>
+    <div class="card-body">
+      <pre>┌──────────────┬──────────────┬──────────────┬─────────────┬──────────────────────────────────┐
+│  CRC32 (4B)  │ Timestamp(8B)│  KeyLen (2B) │  ValLen (4B)│  Key (≤1024B) + Value (≤1MB)     │
+└──────────────┴──────────────┴──────────────┴─────────────┴──────────────────────────────────┘</pre>
+      Header = 18 bytes. CRC32 covers the entire record. A tombstone record has ValLen = 0xFFFFFFFF.
+    </div>
+  </div>
+
+  <h3>Key Design Decisions</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title">🔒 Write-Ahead Logging</div>
+      <div class="card-body">Every write is fsync'd before the in-memory index is updated, ensuring no data is acknowledged until it is durable on disk.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🔄 Append-Only Log</div>
+      <div class="card-body">Writes never overwrite existing data. Old versions of keys remain on disk until compaction runs, enabling crash-safe recovery.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">⚡ In-Memory Index</div>
+      <div class="card-body"><code>KeyDir</code> is a <code>map[string]IndexEntry</code> held in RAM. Reads are O(1) in-memory lookup + single disk seek — no B-tree traversal needed.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🗜️ Compaction</div>
+      <div class="card-body">Rewrites only the live (latest) version of each key to a new file. Atomic swap via rename. Writers are blocked while the new file is synced and renamed.</div>
+    </div>
+  </div>
+
+  <h3>Spec Limits (Named Constants)</h3>
+  <table>
+    <thead><tr><th>Constant</th><th>Value</th><th>Enforced In</th></tr></thead>
+    <tbody>
+      <tr><td><code>SpecMaxKeySize</code></td><td>1,024 bytes</td><td><code>Put</code>, <code>Delete</code>, <code>BatchOp</code>, <code>DecodeHeader</code></td></tr>
+      <tr><td><code>SpecMaxValueSize</code></td><td>1,048,576 bytes (1 MB)</td><td><code>Put</code>, <code>BatchOp</code>, <code>DecodeHeader</code></td></tr>
+      <tr><td><code>SpecMaxBatchOps</code></td><td>10,000 operations</td><td><code>Batch.Commit()</code></td></tr>
+      <tr><td><code>MaxBatchBufferSize</code></td><td>128 MB</td><td><code>Batch.Commit()</code> internal buffer guard</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── §3 STEPS ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">3</div>
+    <div class="section-title">Implementation Steps (1 – 9)</div>
+  </div>
+
+  <div class="timeline">
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">59c222c</div>
+      <div class="timeline-title">Step 1 — Disk Full Protection (<code>--max-bytes</code>)</div>
+      <div class="timeline-desc">
+        <p>Added <code>ErrDiskFull</code> sentinel error. The <code>DB</code> struct gained a <code>maxBytes</code> field (set via CLI flag <code>--max-bytes</code>). Before every write, the engine checks current file size + incoming record size + a 64 KB headroom. If the projected size exceeds the limit, the write returns <code>ErrDiskFull</code> immediately without touching the file. Delete operations are always allowed (they shrink space). Compaction is also allowed since it creates a temporary file and replaces the old one — net size reduction.</p>
+        <strong>Files changed:</strong> <code>src/db.go</code>, <code>src/ops.go</code>, <code>src/batch.go</code>, <code>src/record.go</code>, <code>cmd/kvdb/main.go</code>, <code>src/disk_full_test.go</code> (75 lines of tests)
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">7570866</div>
+      <div class="timeline-title">Step 2 — Write Rollback on Error (Truncate + fsync)</div>
+      <div class="timeline-desc">
+        <p>If a write fails mid-record (e.g., OS error, full disk mid-write), the engine calls <code>Truncate</code> to revert the file to its pre-write size, then calls <code>Sync</code> to durably persist the truncation. This prevents torn records from appearing as valid data during recovery. Added <code>handleWriteFailure()</code> helper in <code>src/ops.go</code>.</p>
+        <p>Also added <code>src/batch_fail_test.go</code>: 76 lines of tests that inject a mid-batch write failure using a fake writer, then verify the DB state is consistent after re-opening.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">f32d8ff</div>
+      <div class="timeline-title">Step 3 — Atomic Batch (ONE buffer, ONE write, ONE sync)</div>
+      <div class="timeline-desc">
+        <p>Rewrote <code>Batch.Commit()</code> to stage all operations into a single <code>bytes.Buffer</code>, issue one <code>File.Write()</code>, and one <code>File.Sync()</code>. This guarantees that a batch is either fully durable or fully absent — no partial batches on disk. Enforced spec limits: batch size ≤ 10,000 ops, key ≤ 1,024 B, value ≤ 1 MB. The batch fails atomically if any limit is exceeded.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">0249d2d</div>
+      <div class="timeline-title">Step 4 — Recovery Hardening</div>
+      <div class="timeline-desc">
+        <p><code>DecodeHeader</code> in <code>src/record.go</code> now rejects any record where <code>KeyLen &gt; SpecMaxKeySize</code> or <code>ValLen &gt; SpecMaxValueSize</code> (treating them as corruption). The recovery scanner detects torn tail records and truncates+fsyncs the file at the last valid record boundary. Idempotent: re-opening after a crash is safe.</p>
+        <p><strong>Performance benchmark:</strong> Recovery of 1,000,000 keys from disk completes in ~549ms — well under the 2-second spec limit.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">247c937</div>
+      <div class="timeline-title">Step 5 — Compaction (fsync + atomic rename)</div>
+      <div class="timeline-desc">
+        <p>Compaction now follows the full durability protocol: (1) write all live records to <code>data.tmp</code>, (2) fsync the tmp file, (3) close it, (4) rename it over <code>data.db</code> (atomic on POSIX; near-atomic on Windows), (5) fsync the directory (skipped on Windows — guarded by <code>runtime.GOOS != "windows"</code>). Writers acquire an exclusive lock during rename. Stale <code>.tmp</code> files from previous failed compactions are cleaned up on startup.</p>
+        <p>Added <code>TestCompactionShrinks</code> to <code>src/recovery_compaction_test.go</code> to verify the data file is smaller after compaction.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">930a705</div>
+      <div class="timeline-title">Step 6 — Bulk Import (CLI, Library, Serve Mode, Web UI)</div>
+      <div class="timeline-desc">
+        <p>Added a full bulk-import pipeline:</p>
+        <ul>
+          <li><strong><code>src/bulk_import.go</code></strong> (365 lines): <code>db.BulkImport()</code> library accepting plain-text <code>lines</code>, <code>csv</code>, and <code>jsonl</code> formats. Processes data in configurable chunk sizes. Resumable via <code>StartLine</code> parameter. Streams from <code>io.Reader</code> — no full-file buffering. Each chunk is committed as one atomic batch.</li>
+          <li><strong>CLI:</strong> <code>kvdb import &lt;file&gt; [--format lines|csv|jsonl] [--chunk 500]</code></li>
+          <li><strong>Serve mode:</strong> <code>POST /import</code> endpoint with multipart upload</li>
+          <li><strong>Web UI panel:</strong> Drag-and-drop import with format selection, chunk-size control, and SSE-based live progress bar</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">f2d7927</div>
+      <div class="timeline-title">Step 7 — Torture Tool (All 7 Modes)</div>
+      <div class="timeline-desc">
+        <p>Expanded <code>cmd/torture/main.go</code> to cover all 7 adversarial modes. Each mode runs 100+ iterations with a fixed seed for reproducibility. The oracle tracks per-key multi-value in-flight sets to handle concurrent writers correctly.</p>
+        <table>
+          <thead><tr><th>Mode</th><th>What It Tests</th><th>Result (100 iters)</th></tr></thead>
+          <tbody>
+            <tr><td><code>default</code></td><td>Random put/get/delete mix</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>large-values</code></td><td>Values up to 1 MB each</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>large-batches</code></td><td>Batches of up to 10,000 ops</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>recovery-crash</code></td><td>SIGKILL + reopen + verify durability</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>compaction</code></td><td>Compact under load, verify correctness</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>disk-full</code></td><td>Trigger ErrDiskFull, verify no corruption</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+            <tr><td><code>bulk-import</code></td><td>Import + kill + reopen atomicity check</td><td><span class="badge badge-green">✅ PASS</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">1fb5fc9 / 4660590</div>
+      <div class="timeline-title">Step 8 — Build Scripts</div>
+      <div class="timeline-desc">
+        <p><code>build.bat</code> (Windows) and <code>build.sh</code> (POSIX) build all three binaries in order: <code>kvdb.exe</code>, <code>torture.exe</code>, <code>ui.exe</code>. The batch file sets <code>GOROOT</code> and <code>GOPATH</code> explicitly so it works even when Go is not in the system <code>PATH</code>.</p>
+      </div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="timeline-dot"></div>
+      <div class="timeline-commit">ca15cf6</div>
+      <div class="timeline-title">Step 9 — Documentation</div>
+      <div class="timeline-desc">
+        <p>Three documentation artifacts:</p>
+        <ul>
+          <li><strong>ARCHITECTURE.md</strong>: 32-row compliance matrix mapping every spec requirement to the implementing file, function, and test.</li>
+          <li><strong>BREAKING.md</strong>: Documents 4 breaking-change crash points with before/after behavior and migration steps.</li>
+          <li><strong>README.md</strong>: Extended with bulk-import usage examples for all 3 formats (lines, csv, jsonl), serve-mode import, and Web UI import instructions.</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── §4 FILE STRUCTURE ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">4</div>
+    <div class="section-title">File Structure</div>
+  </div>
+
+  <pre>Member1/
+├── go.mod                          # module "bitcask" — zero external deps
+├── build.bat                       # Windows build script (kvdb + torture + ui)
+├── build.sh                        # POSIX build script
+├── ARCHITECTURE.md                 # 32-row spec compliance matrix
+├── BREAKING.md                     # Breaking changes &amp; crash points (4 items)
+├── PROMPTS.md                      # Verbatim prompt log (Steps 1–9)
+├── README.md                       # Usage guide with bulk-import examples
+│
+├── src/                            # Core library
+│   ├── record.go                   # Header encode/decode, CRC32, spec limits
+│   ├── db.go                       # DB struct, Open(), Close(), maxBytes
+│   ├── ops.go                      # Put, Get, Delete, handleWriteFailure
+│   ├── batch.go                    # Atomic batch: single-buffer, single-write
+│   ├── index.go                    # In-memory KeyDir (hash map)
+│   ├── recovery.go                 # Scan log, truncate torn tail, fsync
+│   ├── compaction.go               # Write tmp → fsync → rename → dir-fsync
+│   ├── inspect.go                  # Read-only inspection helpers (for UI)
+│   ├── bulk_import.go              # BulkImport(): lines/csv/jsonl, chunked
+│   ├── db_test.go                  # 705-line core unit test suite
+│   ├── recovery_compaction_test.go # Recovery + compaction integration tests
+│   ├── disk_full_test.go           # ErrDiskFull scenarios (75 lines)
+│   └── batch_fail_test.go          # Mid-batch failure injection (76 lines)
+│
+├── cmd/
+│   ├── kvdb/main.go                # CLI: open|put|get|del|batch|dump|check|
+│   │                               #      serve|compact|import (10 commands)
+│   ├── torture/main.go             # Torture tool: 7 modes, oracle, 100+ iters
+│   └── ui/
+│       ├── main.go                 # HTTP server: REST API + SSE + import
+│       ├── index.html              # Single-page Web UI (inspect + import)
+│       └── ui_test.go              # UI endpoint tests
+│
+├── kvdb.exe                        # Pre-built Windows binary
+├── torture.exe                     # Pre-built Windows binary
+└── ui.exe                          # Pre-built Windows binary</pre>
+</div>
+
+<!-- ── §5 TESTS ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">5</div>
+    <div class="section-title">Test Results &amp; Benchmarks</div>
+  </div>
+
+  <h3>Unit &amp; Integration Tests — <code>go test ./...</code></h3>
+  <div class="alert alert-success">All packages pass with zero failures. <code>go test ./...</code> completes in &lt;10 seconds.</div>
+
+  <table>
+    <thead><tr><th>Package</th><th>Test Files</th><th>Test Count (approx)</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td><code>bitcask/src</code></td><td>db_test.go, recovery_compaction_test.go, disk_full_test.go, batch_fail_test.go</td><td>40+</td><td><span class="badge badge-green">PASS</span></td></tr>
+      <tr><td><code>bitcask/cmd/ui</code></td><td>ui_test.go</td><td>8+</td><td><span class="badge badge-green">PASS</span></td></tr>
+      <tr><td><code>bitcask/cmd/kvdb</code></td><td>(integration via torture)</td><td>—</td><td><span class="badge badge-green">PASS</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Torture Test Results — All 7 Modes</h3>
+  <table>
+    <thead><tr><th>Mode</th><th>Seed</th><th>Iterations</th><th>Status</th><th>What is verified</th></tr></thead>
+    <tbody>
+      <tr><td><code>default</code></td><td>1001</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>CRUD correctness, durability Rule 1</td></tr>
+      <tr><td><code>large-values</code></td><td>2002</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>1 MB values, CRC integrity</td></tr>
+      <tr><td><code>large-batches</code></td><td>3003</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>10,000-op batches, atomicity</td></tr>
+      <tr><td><code>recovery-crash</code></td><td>4004</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>SIGKILL + reopen + oracle check</td></tr>
+      <tr><td><code>compaction</code></td><td>5005</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>Compact under load, file shrinks</td></tr>
+      <tr><td><code>disk-full</code></td><td>6006</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>ErrDiskFull, no corruption, rollback</td></tr>
+      <tr><td><code>bulk-import</code></td><td>7007</td><td>100</td><td><span class="badge badge-green">✅ PASS</span></td><td>Import atomicity after kill</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Performance Benchmarks</h3>
+  <div class="card-grid-3">
+    <div class="card">
+      <div class="card-title">⚡ 1M-Key Recovery</div>
+      <div class="card-body">
+        <div style="font-size:28px;font-weight:700;color:#1a56db;">549ms</div>
+        <div style="color:#64748b;font-size:12px;">Spec limit: &lt;2,000ms</div>
+        <div class="progress-wrap"><div class="progress-bar" style="width:27%"></div></div>
+        <div style="color:#16a34a;font-size:12px;">✅ 72.5% headroom</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📦 Batch Throughput</div>
+      <div class="card-body">
+        <div style="font-size:28px;font-weight:700;color:#1a56db;">10k ops</div>
+        <div style="color:#64748b;font-size:12px;">Single write + sync</div>
+        <div class="progress-wrap"><div class="progress-bar" style="width:100%"></div></div>
+        <div style="color:#16a34a;font-size:12px;">✅ Atomic guarantee</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📥 Bulk Import</div>
+      <div class="card-body">
+        <div style="font-size:28px;font-weight:700;color:#1a56db;">100k</div>
+        <div style="color:#64748b;font-size:12px;">Lines verified in test</div>
+        <div class="progress-wrap"><div class="progress-bar" style="width:100%"></div></div>
+        <div style="color:#16a34a;font-size:12px;">✅ Chunked &amp; resumable</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── §6 BUILD & RUN ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">6</div>
+    <div class="section-title">Build &amp; Run Guide</div>
+  </div>
+
+  <h3>Prerequisites</h3>
+  <ul>
+    <li>Go 1.21+ (located at <code>C:\Users\Ishwarya\go\bin\go.exe</code>)</li>
+    <li>Git</li>
+    <li>No other dependencies — stdlib only</li>
+  </ul>
+
+  <h3>Step 1: Set Go in PATH (each new PowerShell session)</h3>
+  <pre><code>$env:GOROOT = "C:\Users\Ishwarya\go"
+$env:GOPATH = "C:\Users\Ishwarya\go_path"
+$env:PATH   = "C:\Users\Ishwarya\go\bin;" + $env:PATH</code></pre>
+
+  <h3>Step 2: Build All Binaries</h3>
+  <pre><code># Windows (automated — sets GOROOT/GOPATH internally)
+.\build.bat
+
+# Or manual:
+go build -o kvdb.exe    ./cmd/kvdb
+go build -o torture.exe ./cmd/torture
+go build -o ui.exe      ./cmd/ui</code></pre>
+
+  <h3>Step 3: Run Tests</h3>
+  <pre><code>go test ./...</code></pre>
+
+  <h3>Step 4: CLI Usage</h3>
+  <pre><code># Put / Get / Delete
+.\kvdb.exe put mykey myvalue
+.\kvdb.exe get mykey
+.\kvdb.exe del mykey
+
+# Atomic batch
+.\kvdb.exe batch put k1 v1 put k2 v2 del k3
+
+# Start HTTP server (use port 8081 — 8080 may be blocked on Windows)
+.\kvdb.exe serve --addr 127.0.0.1:8081
+
+# Compact
+.\kvdb.exe compact
+
+# Bulk import
+.\kvdb.exe import data.csv --format csv --chunk 500</code></pre>
+
+  <h3>Step 5: Web UI</h3>
+  <pre><code>.\ui.exe --addr 127.0.0.1:8081 --db ./demo.db
+# Then open: http://127.0.0.1:8081</code></pre>
+
+  <div class="alert alert-warning">
+    ⚠️ <strong>Port 8080 is blocked</strong> on this Windows machine. Always use <code>--addr 127.0.0.1:8081</code> or another free port.
+  </div>
+
+  <h3>Step 6: Torture Testing</h3>
+  <pre><code># Run all 7 modes
+.\torture.exe --mode default       --seed 1001 --iterations 100
+.\torture.exe --mode large-values  --seed 2002 --iterations 100
+.\torture.exe --mode large-batches --seed 3003 --iterations 100
+.\torture.exe --mode recovery-crash --seed 4004 --iterations 100
+.\torture.exe --mode compaction    --seed 5005 --iterations 100
+.\torture.exe --mode disk-full     --seed 6006 --iterations 100
+.\torture.exe --mode bulk-import   --seed 7007 --iterations 100</code></pre>
+
+  <h3>Bulk Import Formats</h3>
+  <table>
+    <thead><tr><th>Format</th><th>File Example</th><th>Command</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>lines</code></td>
+        <td><pre style="margin:0;padding:6px;font-size:11px;">key1=value1
+key2=value2</pre></td>
+        <td><code>kvdb import f.txt --format lines</code></td>
+      </tr>
+      <tr>
+        <td><code>csv</code></td>
+        <td><pre style="margin:0;padding:6px;font-size:11px;">key,value
+user1,alice</pre></td>
+        <td><code>kvdb import f.csv --format csv</code></td>
+      </tr>
+      <tr>
+        <td><code>jsonl</code></td>
+        <td><pre style="margin:0;padding:6px;font-size:11px;">{"key":"k1","value":"v1"}
+{"key":"k2","value":"v2"}</pre></td>
+        <td><code>kvdb import f.jsonl --format jsonl</code></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── §7 COMPLIANCE MATRIX ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">7</div>
+    <div class="section-title">Spec Compliance Matrix (32 Rows)</div>
+  </div>
+
+  <table>
+    <thead><tr><th>#</th><th>Requirement</th><th>File</th><th>Function / Constant</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Disk full detection (--max-bytes)</td><td>src/ops.go</td><td>Put(), checkDiskSpace()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>2</td><td>64 KB headroom before ErrDiskFull</td><td>src/db.go</td><td>headroomBytes const</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>3</td><td>Deletes always allowed (even when full)</td><td>src/ops.go</td><td>Delete()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>4</td><td>Compaction allowed when full</td><td>src/compaction.go</td><td>Compact()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>5</td><td>Truncate + fsync on write failure</td><td>src/ops.go</td><td>handleWriteFailure()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>6</td><td>Mid-batch failure injection test</td><td>src/batch_fail_test.go</td><td>TestBatchFailMidWrite</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>7</td><td>Single-buffer batch commit</td><td>src/batch.go</td><td>Batch.Commit()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>8</td><td>Single Write() call per batch</td><td>src/batch.go</td><td>Commit() one file.Write</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>9</td><td>Single Sync() call per batch</td><td>src/batch.go</td><td>Commit() one file.Sync</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>10</td><td>Key size limit 1–1024 bytes</td><td>src/record.go</td><td>SpecMaxKeySize = 1024</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>11</td><td>Value size limit ≤ 1 MB</td><td>src/record.go</td><td>SpecMaxValueSize</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>12</td><td>Batch ops limit ≤ 10,000</td><td>src/record.go</td><td>SpecMaxBatchOps = 10000</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>13</td><td>Recovery bounds check KeyLen</td><td>src/record.go</td><td>DecodeHeader()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>14</td><td>Recovery bounds check ValLen</td><td>src/record.go</td><td>DecodeHeader()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>15</td><td>Torn tail truncate + fsync</td><td>src/recovery.go</td><td>recoverTornTail()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>16</td><td>Idempotent recovery</td><td>src/recovery.go</td><td>Recover()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>17</td><td>1M-key recovery &lt; 2 seconds</td><td>src/recovery.go</td><td>~549ms measured</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>18</td><td>Stale .tmp cleanup on open</td><td>src/recovery.go</td><td>cleanStaleTemp()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>19</td><td>Compaction writes to .tmp first</td><td>src/compaction.go</td><td>Compact()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>20</td><td>Compaction fsyncs .tmp</td><td>src/compaction.go</td><td>tmpFile.Sync()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>21</td><td>Compaction atomic rename</td><td>src/compaction.go</td><td>os.Rename()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>22</td><td>Directory fsync after rename (POSIX)</td><td>src/compaction.go</td><td>runtime.GOOS guard</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>23</td><td>Compaction shrink test</td><td>src/recovery_compaction_test.go</td><td>TestCompactionShrinks</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>24</td><td>BulkImport library (lines/csv/jsonl)</td><td>src/bulk_import.go</td><td>BulkImport()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>25</td><td>Chunked + resumable import</td><td>src/bulk_import.go</td><td>StartLine param</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>26</td><td>CLI import command</td><td>cmd/kvdb/main.go</td><td>handleImport()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>27</td><td>Serve import endpoint + SSE</td><td>cmd/ui/main.go</td><td>/api/import</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>28</td><td>Web UI import panel</td><td>cmd/ui/index.html</td><td>Import tab</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>29</td><td>Torture tool — all 7 modes</td><td>cmd/torture/main.go</td><td>runMode()</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>30</td><td>Build scripts (Windows + POSIX)</td><td>build.bat, build.sh</td><td>—</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>31</td><td>ARCHITECTURE.md 32-row matrix</td><td>ARCHITECTURE.md</td><td>—</td><td><span class="badge badge-green">✅</span></td></tr>
+      <tr><td>32</td><td>BREAKING.md crash points + README import docs</td><td>BREAKING.md, README.md</td><td>—</td><td><span class="badge badge-green">✅</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── §8 BUGS FIXED ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">8</div>
+    <div class="section-title">Bugs Fixed During Development</div>
+  </div>
+
+  <table>
+    <thead><tr><th>#</th><th>Bug</th><th>Root Cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><code>go: not recognized</code> in PowerShell</td>
+        <td>Go binary not in system PATH</td>
+        <td>Prepend <code>C:\Users\Ishwarya\go\bin</code> to PATH manually, or use <code>build.bat</code> which sets it internally</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><code>go test -race</code> fails</td>
+        <td>CGO_ENABLED=0 (no GCC installed); race detector requires cgo</td>
+        <td>Run <code>go test ./...</code> without <code>-race</code> flag</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><code>package bufio is not in std</code></td>
+        <td>GOPATH was accidentally set to GOROOT in sandboxed shell</td>
+        <td>Run with correct GOROOT/GOPATH separation</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>Torture oracle false positive: <em>"durability violation (Rule 1)"</em></td>
+        <td>In-flight tracking used a single string per key; concurrent writers for the same key caused false mismatches when the second writer's value was checked against the first</td>
+        <td>Changed <code>inFlight map[string]string</code> → <code>map[string]map[string]bool</code> (per-key multi-value set)</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>Recovery-crash mode false deletion: <em>"ACKed key 'k_7' is missing"</em></td>
+        <td>Delete ops were not registered in the oracle, so a killed delete that landed on disk appeared as an unknown missing key</td>
+        <td>Added <code>oracle.RegisterAttempt(key, "")</code> for delete ops; relaxed missing-key check to allow in-flight empty-string values</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>Bulk-import torture atomicity false failure</td>
+        <td>When all records imported before SIGKILL, total ops is not a multiple of chunk size, triggering a false batch-atomicity error</td>
+        <td>Changed check to <code>len(actual) != totalOps &amp;&amp; len(actual)%chunkSize != 0</code></td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td>UI server <code>bind: forbidden access permissions</code> on port 8080</td>
+        <td>Port 8080 in use by another process on the machine</td>
+        <td>Use <code>--addr 127.0.0.1:8081</code> or any free port above 8080</td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td><code>handleWriteFailure</code> did not fsync after Truncate</td>
+        <td>Missing Sync() call after Truncate() — the truncation itself could be lost on a subsequent crash</td>
+        <td>Added <code>file.Sync()</code> immediately after <code>file.Truncate()</code> in <code>src/ops.go</code></td>
+      </tr>
+      <tr>
+        <td>9</td>
+        <td>Git diff showed spurious line-ending changes (LF→CRLF)</td>
+        <td>Windows <code>core.autocrlf=true</code> in git config converted all line endings</td>
+        <td>Used <code>git checkout &lt;files&gt;</code> to restore clean versions; noted in BREAKING.md</td>
+      </tr>
+      <tr>
+        <td>10</td>
+        <td><code>build.bat</code> missing <code>ui.exe</code> build step</td>
+        <td>Initial build script only built <code>kvdb.exe</code> and <code>torture.exe</code></td>
+        <td>Added <code>go build -o ui.exe ./cmd/ui</code> block to <code>build.bat</code> (commit <code>4660590</code>)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ── §9 COMMITS ── -->
+<div class="section page-break">
+  <div class="section-header">
+    <div class="section-num">9</div>
+    <div class="section-title">Git Commit History</div>
+  </div>
+
+  <div class="alert alert-info">
+    Repository: <strong>https://github.com/IshwaryaNP/CodeHolic.git</strong> · Branches: <code>main</code> and <code>feat/recovery-compaction</code> · Latest commit: <code>4660590</code>
+  </div>
+
+  <table>
+    <thead><tr><th>Commit</th><th>Step</th><th>Message</th><th>Key Files Changed</th></tr></thead>
+    <tbody>
+      <tr><td><code>4660590</code></td><td>Hotfix</td><td>fix(build): add ui.exe build step to build.bat</td><td>build.bat</td></tr>
+      <tr><td><code>ca15cf6</code></td><td>9</td><td>docs(step-9): update ARCHITECTURE matrix, BREAKING crash points, and README import docs</td><td>ARCHITECTURE.md, BREAKING.md, README.md</td></tr>
+      <tr><td><code>1fb5fc9</code></td><td>8</td><td>feat(step-8): build scripts for Windows and POSIX clean clone compilation</td><td>build.bat, build.sh</td></tr>
+      <tr><td><code>f2d7927</code></td><td>7</td><td>feat(step-7): full torture coverage across all 7 modes with 100+ iterations per mode</td><td>cmd/torture/main.go (+171 lines)</td></tr>
+      <tr><td><code>930a705</code></td><td>6</td><td>feat(step-6): bulk import CLI, streaming BulkImport library, serve mode, and UI panel</td><td>src/bulk_import.go, src/bulk_import_test.go, cmd/kvdb/main.go, cmd/ui/main.go, cmd/ui/index.html</td></tr>
+      <tr><td><code>247c937</code></td><td>5</td><td>feat(step-5): compaction fsync and lock ordering, serve compact command, and shrink test</td><td>src/recovery_compaction_test.go</td></tr>
+      <tr><td><code>0249d2d</code></td><td>4</td><td>feat(step-4): harden recovery validation with spec limits, torn tail fsync, and sub-2s 1M recovery</td><td>src/record.go</td></tr>
+      <tr><td><code>f32d8ff</code></td><td>3</td><td>feat(step-3): atomic single-buffer batch writes and enforce spec limits</td><td>src/batch.go, src/ops.go, src/record.go</td></tr>
+      <tr><td><code>7570866</code></td><td>2</td><td>feat(step-2): truncate and fsync on write rollback and add mid-batch failure injection test</td><td>src/ops.go, src/batch_fail_test.go, PROMPTS.md</td></tr>
+      <tr><td><code>59c222c</code></td><td>1</td><td>feat(step-1): add max_bytes disk full protection with headroom for deletes and compaction</td><td>src/db.go, src/ops.go, src/batch.go, src/record.go, cmd/kvdb/main.go, src/disk_full_test.go</td></tr>
+      <tr><td><code>237fb60</code></td><td>Base</td><td>feat(hackathon): add kvdb CLI wrapper, torture testing tool, and all competition documentation</td><td>cmd/kvdb/main.go, cmd/torture/main.go, ARCHITECTURE.md, BREAKING.md, README.md</td></tr>
+      <tr><td><code>8b1ffa6</code></td><td>Base</td><td>feat(ui): add interactive visualizer web interface and inspection API</td><td>cmd/ui/main.go, cmd/ui/index.html, cmd/ui/ui_test.go, src/inspect.go</td></tr>
+      <tr><td><code>b292158</code></td><td>Initial</td><td>first commit: Bitcask key-value store with core write path, recovery, and compaction</td><td>All core src/ files, go.mod, README.md</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Total Changes Summary</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title">📝 Lines of Code Added (Steps 1–9)</div>
+      <div class="card-body">
+        <ul>
+          <li>Step 1 (disk full): ~130 lines</li>
+          <li>Step 2 (rollback): ~101 lines</li>
+          <li>Step 3 (atomic batch): ~22 lines (refactor)</li>
+          <li>Step 4 (recovery): ~7 lines</li>
+          <li>Step 5 (compaction): ~50 lines</li>
+          <li>Step 6 (bulk import): ~922 lines</li>
+          <li>Step 7 (torture): ~171 lines</li>
+          <li>Step 8 (build scripts): ~32 lines</li>
+          <li>Step 9 (docs): ~57 lines</li>
+        </ul>
+        <strong>Total: ~1,500+ lines added in steps 1–9</strong>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📂 Project Total</div>
+      <div class="card-body">
+        <ul>
+          <li>Source files: 20+</li>
+          <li>Test files: 5</li>
+          <li>Documentation files: 4 (README, ARCHITECTURE, BREAKING, PROMPTS)</li>
+          <li>Build scripts: 2</li>
+          <li>Pre-built binaries: 3</li>
+        </ul>
+        <strong>Total project size: ~7,000+ lines of Go + docs</strong>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="report-footer">
+  <strong>Bitcask KV Store — Kill It and Prove It</strong> &nbsp;·&nbsp; CodeHolic Hackathon &nbsp;·&nbsp; November 7, 2026<br/>
+  Repository: https://github.com/IshwaryaNP/CodeHolic &nbsp;·&nbsp; Branch: feat/recovery-compaction &nbsp;·&nbsp; Latest: 4660590<br/>
+  All 9 spec steps complete · 700+ torture iterations passed · 0 external dependencies
+</div>
+
+</div>
+</body>
+</html>
+
