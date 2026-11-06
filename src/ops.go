@@ -32,10 +32,20 @@ func (db *DB) Put(key, val []byte) error {
 
 	// Calculate needed record length: HeaderSize + len(key) + len(val)
 	recordLen := int64(HeaderSize + len(key) + len(val))
-	// Reserve headroom (at least 64KB or record size) so Delete operations and compaction still work at the cap.
-	if db.maxBytes > 0 {
-		headroom := int64(64 * 1024)
-		if db.writeOffset+recordLen+headroom > db.maxBytes {
+	if db.maxBytes > 0 && db.writeOffset+recordLen > db.maxBytes {
+		// Check if reclaimable space from stale/deleted records is sufficient
+		reclaimable := db.writeOffset - db.liveBytesLocked()
+		if reclaimable >= recordLen {
+			c := &compactor{db: db}
+			if compErr := c.runLocked(); compErr == nil {
+				// Compaction succeeded; re-check against maxBytes once
+				if db.writeOffset+recordLen > db.maxBytes {
+					return ErrDiskFull
+				}
+			} else {
+				return ErrDiskFull
+			}
+		} else {
 			return ErrDiskFull
 		}
 	}

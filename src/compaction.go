@@ -30,15 +30,40 @@ type liveEntry struct {
 
 // Compact reclaims disk space by writing all active live records to a temporary file,
 // fsyncing, closing, and atomically replacing the active log file.
+// Note: Compaction temp files (*.tmp) do NOT count against --max-bytes;
+// --max-bytes bounds only the primary active data log.
 func (db *DB) Compact() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	c := &compactor{db: db}
-	return c.run()
+	return c.runLocked()
+}
+
+// liveBytesLocked calculates the sum of all live record sizes (header + key + val)
+// currently indexed in the database. Caller MUST hold db.mu (RLock or Lock).
+func (db *DB) liveBytesLocked() int64 {
+	var total int64
+	var hdrBuf [HeaderSize]byte
+	db.index.Range(func(key string, off int64) bool {
+		if _, err := db.file.ReadAt(hdrBuf[:], off); err == nil {
+			if hdr, err := DecodeHeader(hdrBuf[:]); err == nil && hdr.OpType == OpPut {
+				total += int64(hdr.TotalLen)
+			}
+		}
+		return true
+	})
+	return total
 }
 
 func (c *compactor) run() error {
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
+	return c.runLocked()
+}
 
+// runLocked executes compaction. Precondition: caller MUST hold c.db.mu.Lock.
+func (c *compactor) runLocked() error {
 	if c.db.closed {
 		return ErrClosed
 	}

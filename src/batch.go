@@ -118,15 +118,28 @@ func (db *DB) Write(b *Batch) error {
 		return ErrBroken
 	}
 
-	// Pre-check batch total size against MaxBytes with headroom
+	// Pre-check batch total size against MaxBytes
 	if db.maxBytes > 0 {
 		var estimatedBatchBytes int64 = HeaderSize * 2 // Begin + Commit
 		for _, op := range b.ops {
 			estimatedBatchBytes += int64(HeaderSize + len(op.key) + len(op.val))
 		}
-		headroom := int64(64 * 1024)
-		if db.writeOffset+estimatedBatchBytes+headroom > db.maxBytes {
-			return ErrDiskFull
+		if db.writeOffset+estimatedBatchBytes > db.maxBytes {
+			// Check if reclaimable space is sufficient to fit this batch after compaction
+			reclaimable := db.writeOffset - db.liveBytesLocked()
+			if reclaimable >= estimatedBatchBytes {
+				c := &compactor{db: db}
+				if compErr := c.runLocked(); compErr == nil {
+					// Re-check once after compaction
+					if db.writeOffset+estimatedBatchBytes > db.maxBytes {
+						return ErrDiskFull
+					}
+				} else {
+					return ErrDiskFull
+				}
+			} else {
+				return ErrDiskFull
+			}
 		}
 	}
 

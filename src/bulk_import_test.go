@@ -143,9 +143,9 @@ func TestBulkImport_DiskFull(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "diskfull_import.db")
 
-	// Set small max bytes
+	// Set small max bytes: 1000 records of ~35 bytes = ~35 KB, so 10 KB will hit ErrDiskFull quickly
 	opts := DefaultOptions()
-	opts.MaxBytes = 70 * 1024 // 70 KB
+	opts.MaxBytes = 10 * 1024 // 10 KB
 	db, err := Open(dbPath, opts)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
