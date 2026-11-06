@@ -174,6 +174,35 @@ tr.flash td { animation: flash .6s; }
         <button class="btn" style="border-color:var(--batch);color:var(--batch)" onclick="doCommitBatch()">✅ Commit Batch</button>
         <button class="btn" onclick="batchClear()">Clear</button>
       </div>
+
+      <hr class="section-sep">
+      <div class="section-label">Import Data</div>
+      <div class="field-group">
+        <label>Format</label>
+        <select id="import-fmt" style="background:#222;color:#eee;border:1px solid #444;padding:4px;border-radius:4px;width:100%">
+          <option value="lines">lines (put &lt;k&gt; &lt;v&gt; / del &lt;k&gt;)</option>
+          <option value="csv">csv (key,value)</option>
+          <option value="jsonl">jsonl ({"key":"..","value":".."})</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label>Chunk Size</label>
+        <input type="number" id="import-chunk" value="5000" min="1" max="10000" />
+      </div>
+      <div class="field-group">
+        <label>File (drag-and-drop or pick)</label>
+        <input type="file" id="import-file" style="font-size:11px" />
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-put" onclick="doImport()">Start Bulk Import</button>
+      </div>
+      <div id="import-progress-wrap" style="display:none;margin-top:8px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:3px" id="import-status">Streaming chunks...</div>
+        <div style="width:100%;background:#333;height:8px;border-radius:4px;overflow:hidden">
+          <div id="import-bar" style="width:0%;background:var(--batch);height:100%;transition:width 0.2s"></div>
+        </div>
+      </div>
+      <div id="import-result" style="font-size:11px;margin-top:6px;word-break:break-all"></div>
     </div>
   </div>
 
@@ -436,6 +465,85 @@ async function doUncommittedBatch() {
     log(`Uncommitted batch simulation: recovery truncated ${fmt(r.truncatedBytes)}, ${r.keysAfter} keys remain (crash1..crash3 absent) in ${r.durationMs}ms`, 'err');
     await refresh();
   } catch(e) { log('Uncommitted batch failed: '+e.message, 'err'); }
+}
+
+// ---- BULK IMPORT ----
+async function doImport() {
+  const fileInput = document.getElementById('import-file');
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert('Please select a file to import.');
+    return;
+  }
+  const file = fileInput.files[0];
+  const fmtVal = document.getElementById('import-fmt').value;
+  const chunkVal = document.getElementById('import-chunk').value || '5000';
+
+  const formData = new FormData();
+  formData.append('format', fmtVal);
+  formData.append('chunk', chunkVal);
+  formData.append('on_error', 'abort');
+  formData.append('file', file);
+
+  const wrap = document.getElementById('import-progress-wrap');
+  const status = document.getElementById('import-status');
+  const bar = document.getElementById('import-bar');
+  const resEl = document.getElementById('import-result');
+
+  wrap.style.display = 'block';
+  bar.style.width = '10%';
+  status.textContent = 'Uploading and streaming import...';
+  resEl.textContent = '';
+
+  try {
+    const response = await fetch('/api/import', {
+      method: 'POST',
+      body: formData
+    });
+    if (!response.ok) {
+      throw new Error(`Server returned ${response.status}: ${await response.text()}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n\n');
+      buf = lines.pop(); // keep remainder
+
+      for (const block of lines) {
+        if (!block.startsWith('data: ')) continue;
+        const jsonStr = block.replace(/^data:\s*/, '');
+        try {
+          const ev = JSON.parse(jsonStr);
+          if (ev.type === 'progress') {
+            status.textContent = `Committed chunk ${ev.chunk}: ${ev.opsInChunk} ops (total: ${ev.totalOps}, line: ${ev.lastLine})`;
+            bar.style.width = '60%';
+            log(`Import chunk ${ev.chunk} committed (${ev.opsInChunk} ops, total ${ev.totalOps})`, 'ok');
+          } else if (ev.type === 'complete') {
+            bar.style.width = '100%';
+            if (ev.error) {
+              status.textContent = 'Import halted with error.';
+              resEl.innerHTML = `<span style="color:var(--del)">Failed: ${esc(ev.error)} (Committed: ${ev.ops_applied} ops in ${ev.chunks} chunks)</span>`;
+              log(`Import stopped: ${esc(ev.error)}`, 'err');
+            } else {
+              status.textContent = 'Import complete!';
+              resEl.innerHTML = `<span style="color:var(--batch)">Success! Read ${ev.lines_read} lines, applied ${ev.ops_applied} ops across ${ev.chunks} chunks in ${ev.elapsed_ms}ms</span>`;
+              log(`Import completed: ${ev.ops_applied} ops applied in ${ev.elapsed_ms}ms`, 'ok');
+            }
+          }
+        } catch(e) {}
+      }
+    }
+    await refresh();
+  } catch(err) {
+    status.textContent = 'Import failed';
+    resEl.innerHTML = `<span style="color:var(--del)">Error: ${esc(err.message)}</span>`;
+    log('Import network/stream error: '+err.message, 'err');
+  }
 }
 function clearLog() { document.getElementById('log-body').innerHTML = ''; }
 

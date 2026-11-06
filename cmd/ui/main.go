@@ -633,6 +633,111 @@ func (s *server) handleCrashUncommittedBatch(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (s *server) handleImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Sane upload limit: 128MB
+	const maxUploadSize = 128 * 1024 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
+	// Stream multipart form without loading entire file into memory
+	mr, err := r.MultipartReader()
+	if err != nil {
+		errJSON(w, 400, "expected multipart form: "+err.Error())
+		return
+	}
+
+	format := src.FormatLines
+	chunkSize := 5000
+	onError := src.OnErrorAbort
+
+	var filePart io.Reader
+
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			errJSON(w, 400, "error reading form part: "+err.Error())
+			return
+		}
+
+		formName := part.FormName()
+		if formName == "format" {
+			data, _ := io.ReadAll(part)
+			format = src.ImportFormat(string(data))
+		} else if formName == "chunk" {
+			data, _ := io.ReadAll(part)
+			var n int
+			_, _ = fmt.Sscanf(string(data), "%d", &n)
+			if n > 0 {
+				chunkSize = n
+			}
+		} else if formName == "on_error" {
+			data, _ := io.ReadAll(part)
+			onError = src.OnErrorAction(string(data))
+		} else if formName == "file" {
+			filePart = part
+			break
+		}
+	}
+
+	if filePart == nil {
+		errJSON(w, 400, "missing file part in multipart form")
+		return
+	}
+
+	// Prepare SSE response for streaming progress
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		errJSON(w, 500, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opts := src.ImportOptions{
+		Format:    format,
+		ChunkSize: chunkSize,
+		OnError:   onError,
+		OnChunk: func(chunkIdx, opsInChunk, totalCommittedOps, lastLine int) {
+			progressData, _ := json.Marshal(map[string]any{
+				"type":        "progress",
+				"chunk":       chunkIdx,
+				"opsInChunk":  opsInChunk,
+				"totalOps":    totalCommittedOps,
+				"lastLine":    lastLine,
+			})
+			fmt.Fprintf(w, "data: %s\n\n", string(progressData))
+			flusher.Flush()
+		},
+	}
+
+	res, importErr := s.db.BulkImport(filePart, opts)
+	finalData, _ := json.Marshal(map[string]any{
+		"type":         "complete",
+		"lines_read":   res.LinesRead,
+		"ops_applied":  res.OpsApplied,
+		"chunks":       res.Chunks,
+		"skipped":      res.Skipped,
+		"last_line":    res.LastLine,
+		"elapsed_ms":   res.ElapsedTime.Milliseconds(),
+		"stopped_early": res.StoppedEarly,
+		"error":        func() string { if importErr != nil { return importErr.Error() }; return "" }(),
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(finalData))
+	flusher.Flush()
+}
+
 func main() {
 	dbPath := flag.String("db", "./demo.db", "path to bitcask database file")
 	addr := flag.String("addr", "127.0.0.1:8080", "address to bind")
@@ -656,6 +761,7 @@ func main() {
 	mux.HandleFunc("/api/restart", srv.handleRestart)
 	mux.HandleFunc("/api/crash/torn", srv.handleCrashTorn)
 	mux.HandleFunc("/api/crash/uncommitted-batch", srv.handleCrashUncommittedBatch)
+	mux.HandleFunc("/api/import", srv.handleImport)
 
 	log.Printf("Bitcask UI server listening on http://%s (db: %s)", *addr, *dbPath)
 	if err := http.ListenAndServe(*addr, mux); err != nil {

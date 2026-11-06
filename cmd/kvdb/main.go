@@ -23,7 +23,9 @@ Commands:
   batch <path> <file>          Applies put/del operations from file ("put k v" or "del k")
   dump <path>                  Prints every key and value, sorted by key ("<key>=<value>")
   check <path>                 Verifies file integrity, prints OK or a reason
-  serve <path>                 Reads ops from stdin ("put k v", "del k", "batch <file>"), prints ACK <id>`)
+  serve <path>                 Reads ops from stdin ("put k v", "del k", "batch <file>", "compact", "import <file>"), prints ACK <id>
+  compact <path>               Reclaims deleted and overwritten disk space
+  import <path> <file>         Bulk imports data (--format lines|csv|jsonl --chunk N --max-bytes N --on-error skip|abort --start-line L)`)
 }
 
 func main() {
@@ -52,6 +54,10 @@ func main() {
 		handleCheck(args)
 	case "serve":
 		handleServe(args)
+	case "compact":
+		handleCompact(args)
+	case "import":
+		handleImport(args)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -462,6 +468,35 @@ func handleServe(args []string) {
 				os.Stdout.Sync()
 			}
 
+		case "import":
+			if len(parts) < 3 {
+				fmt.Fprintf(os.Stderr, "ERR %s import requires file path\n", opID)
+				continue
+			}
+			importFilePath := parts[2]
+			impFile, err := os.Open(importFilePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERR %s import file open: %v\n", opID, err)
+				continue
+			}
+			importOpts := src.ImportOptions{
+				Format:    src.FormatLines,
+				ChunkSize: 5000,
+				OnError:   src.OnErrorAbort,
+				OnChunk: func(chunkIdx, opsInChunk, totalCommittedOps, lastLine int) {
+					fmt.Printf("ACK %s chunk=%d ops=%d total=%d\n", opID, chunkIdx, opsInChunk, totalCommittedOps)
+					os.Stdout.Sync()
+				},
+			}
+			res, err := db.BulkImport(impFile, importOpts)
+			impFile.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERR %s import failed: %v (chunks=%d, ops=%d)\n", opID, err, res.Chunks, res.OpsApplied)
+			} else {
+				fmt.Printf("ACK %s total_ops=%d\n", opID, res.OpsApplied)
+				os.Stdout.Sync()
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "ERR %s unknown op %s\n", opID, op)
 		}
@@ -505,4 +540,84 @@ func readBatchFile(filePath string) (*src.Batch, error) {
 		}
 	}
 	return b, scanner.Err()
+}
+
+func handleCompact(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: kvdb compact <path>")
+		os.Exit(1)
+	}
+	path := args[0]
+	db, err := src.Open(path, src.DefaultOptions())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Compact(); err != nil {
+		fmt.Fprintf(os.Stderr, "Compact error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("ACK")
+}
+
+func handleImport(args []string) {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	formatStr := fs.String("format", "lines", "input data format (lines, csv, jsonl)")
+	chunkSize := fs.Int("chunk", 5000, "number of ops per atomic chunk batch (max 10000)")
+	maxBytes := fs.Int64("max-bytes", 0, "maximum permitted database file size in bytes")
+	onErrorStr := fs.String("on-error", "abort", "action on malformed/invalid line (abort, skip)")
+	startLine := fs.Int("start-line", 1, "1-based line number to start/resume importing from")
+	_ = fs.Parse(args)
+
+	remaining := fs.Args()
+	if len(remaining) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: kvdb import <path> <file> [--format lines|csv|jsonl] [--chunk N] [--max-bytes N] [--on-error skip|abort] [--start-line L]")
+		os.Exit(1)
+	}
+	dbPath := remaining[0]
+	filePath := remaining[1]
+
+	opts := src.DefaultOptions()
+	if *maxBytes > 0 {
+		opts.MaxBytes = *maxBytes
+	}
+
+	db, err := src.Open(dbPath, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Open error: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open import file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	importOpts := src.ImportOptions{
+		Format:    src.ImportFormat(*formatStr),
+		ChunkSize: *chunkSize,
+		StartLine: *startLine,
+		OnError:   src.OnErrorAction(*onErrorStr),
+		OnChunk: func(chunkIdx, opsInChunk, totalCommittedOps, lastLine int) {
+			fmt.Printf("ACK chunk %d ops=%d total=%d last_line=%d\n", chunkIdx, opsInChunk, totalCommittedOps, lastLine)
+			os.Stdout.Sync()
+		},
+	}
+
+	res, err := db.BulkImport(f, importOpts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Import stopped with error: %v (last committed line: %d, chunks: %d, applied: %d)\n",
+			err, res.LastLine, res.Chunks, res.OpsApplied)
+		fmt.Printf("SUMMARY: lines_read=%d ops_applied=%d chunks=%d skipped=%d last_line=%d elapsed=%v error=%v\n",
+			res.LinesRead, res.OpsApplied, res.Chunks, res.Skipped, res.LastLine, res.ElapsedTime.Round(time.Millisecond), err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("SUMMARY: lines_read=%d ops_applied=%d chunks=%d skipped=%d last_line=%d elapsed=%v\n",
+		res.LinesRead, res.OpsApplied, res.Chunks, res.Skipped, res.LastLine, res.ElapsedTime.Round(time.Millisecond))
 }
