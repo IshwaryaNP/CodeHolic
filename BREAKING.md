@@ -54,6 +54,10 @@ Our architecture relies on an uncompromising write-ordering discipline:
   Windows Defender aggressively blocks or delays binaries compiled with `-race` when executed from the user temp directory (`%TEMP%`), causing tests to fail with access errors. We resolved this by compiling test and torture binaries directly into the workspace folder.
 - **Interleaved Stdin/Stdout Buffering in Serve Mode**:
   Initial versions of `kvdb serve` did not explicitly call `os.Stdout.Sync()` after emitting `ACK <op-id>`. When concurrent writers sent high-throughput requests, ACKs were buffered in the runtime output buffer and never flushed to the torture tool before process termination, causing the torture oracle to report false durability failures. Adding explicit stdout flushes eliminated this bug.
+- **Concurrent Writer In-Flight Overwrite Oracle Mismatch**:
+  With 2+ concurrent torture writers updating the same key concurrently, an in-flight un-ACKed write from Worker A could land on disk after Worker B's write had already been ACKed. The initial torture oracle tracked in-flight state as a single scalar, causing false-positive verification errors on killed processes. Refactoring the oracle to track a per-key multi-value candidate set solved this without compromising Rule 1 (every ACKed write survives) or Rule 4 (no unknown values ever appear).
+- **Batch Atomicity Key Count Check on Finished Bulk Imports**:
+  In torture `--mode bulk-import`, when an import finished all records in the file before the random kill timer elapsed, checking `len(actual) % chunkSize == 0` failed if the total operations in the test file were not an exact multiple of the chunk size. Checking that the visible set is either an exact multiple of `chunkSize` or matches the entire expected dataset resolved this cleanly.
 
 ---
 

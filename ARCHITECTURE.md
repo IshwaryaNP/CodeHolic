@@ -77,15 +77,15 @@ flowchart TD
 | **D2** | Two writers putting same key | Global `db.mu` serializes append order; last durable write wins. | `src/ops.go:Put()` | `torture --iterations 500` |
 | **D3** | One batch writer, one single writer | `db.mu` enforces atomic serialization; single put never interleaves within batch bytes. | `src/batch.go:Write()` | `src/db_test.go:TestDB_Concurrency` |
 | **D4** | Reader calling `get` during batch | Reader acquires `mu.RLock()`; sees snapshot before or after batch commit. | `src/ops.go:Get()`, `src/batch.go:Write()` | `src/db_test.go:TestDB_Concurrency` |
-| **E1** | File cap reached during single put | Pre-write size check fails; returns `ErrDiskFull` without writing bytes. | `cmd/kvdb/main.go` | manual test |
-| **E2** | File cap reached halfway through batch | Batch pre-validates buffer size against limit; rejected before disk write. | `src/batch.go:Write()` | manual test |
-| **E3** | File cap reached then killed | No partial corrupted records written; recovery succeeds normally. | `src/recovery.go:Recover()` | manual test |
+| **E1** | File cap reached during single put | Pre-write size check fails; returns `ErrDiskFull` without writing bytes. | `src/ops.go:Put()` | `torture --mode disk-full --seed 6006` |
+| **E2** | File cap reached halfway through batch | Batch pre-validates buffer size against limit; rejected before disk write. | `src/batch.go:Write()` | `src/disk_full_test.go:TestDiskFull_PutBatchDelete` |
+| **E3** | File cap reached then killed | No partial corrupted records written; recovery succeeds normally. | `src/recovery.go:Recover()` | `torture --mode disk-full --seed 6006` |
 | **E4** | Cap reached during compaction | Compaction tmp write fails; old database file untouched and remains authoritative. | `src/compaction.go:run()` | `src/recovery_compaction_test.go:TestCompaction_FailureInjectionHooks` |
-| **E5** | Deletes free up space, compaction runs | Compaction discards tombstoned entries, shrinking file below cap. | `src/compaction.go:run()` | `src/recovery_compaction_test.go:TestCompaction_Correctness` |
-| **F1** | 500 consecutive random kills | All ACKed writes survive; invariant holds after every cycle. | `cmd/torture/main.go` | `torture --iterations 500` |
-| **F2** | Kill, restart, kill during recovery, restart | Recovery is pure idempotent replay; multiple interruptions safe. | `src/recovery.go:Recover()` | `torture --mode recovery-crash` |
-| **F3** | 1,000,000 keys written, killed, `open()` called | 1MB buffered I/O scans and indexes 1M keys in ~0.64s (<2s limit). | `src/recovery.go:Recover()` | `src/recovery_compaction_test.go:BenchmarkRecovery_1M_Keys` |
-| **F4** | Log truncated by 1 byte at tail | Tail byte mismatch fails 15-byte header check; file cleanly truncated to previous record. | `src/recovery.go:Recover()` | `src/recovery_compaction_test.go:TestRecovery_TruncatedMidRecord` |
+| **E5** | Deletes free up space, compaction runs | Compaction discards tombstoned entries, shrinking file below cap (64KB headroom ensures deletes succeed). | `src/compaction.go:run()` | `src/recovery_compaction_test.go:TestCompaction_ShrinkAfter1MPutsAndDeletes` |
+| **F1** | 500 consecutive random kills | All ACKed writes survive; invariant holds after every cycle. | `cmd/torture/main.go` | `torture --mode default --seed 1001` |
+| **F2** | Kill, restart, kill during recovery, restart | Recovery is pure idempotent replay; multiple interruptions safe. | `src/recovery.go:Recover()` | `torture --mode recovery-crash --seed 4004` |
+| **F3** | 1,000,000 keys written, killed, `open()` called | 1MB buffered I/O scans and indexes 1M keys in ~0.55s (<2s limit). | `src/recovery.go:Recover()` | `src/recovery_compaction_test.go:BenchmarkRecovery_1M_Keys` |
+| **F4** | Log truncated by 1 byte at tail | Tail byte mismatch fails 15-byte header check; file cleanly truncated to previous record and synced. | `src/recovery.go:Recover()` | `src/recovery_compaction_test.go:TestRecovery_TruncatedMidRecord` |
 
 ---
 

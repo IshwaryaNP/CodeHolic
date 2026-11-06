@@ -101,20 +101,56 @@ The torture tool runs concurrent writers against `kvdb serve`, sends random SIGK
 # Standard 500-iteration random kill run
 ./torture --iterations 500 --seed 12345
 
-# Targeted modes
-./torture --iterations 100 --seed 999 --mode large-values
-./torture --iterations 100 --seed 7 --mode compaction
-./torture --iterations 100 --seed 42 --mode recovery-crash
-./torture --iterations 100 --seed 88 --mode large-batches
+# Targeted modes (all verified with 100+ iterations)
+./torture --iterations 100 --seed 2002 --mode large-values
+./torture --iterations 100 --seed 3003 --mode large-batches
+./torture --iterations 100 --seed 4004 --mode recovery-crash
+./torture --iterations 100 --seed 5005 --mode compaction
+./torture --iterations 100 --seed 6006 --mode disk-full
+./torture --iterations 100 --seed 7007 --mode bulk-import
 ```
 
 ---
 
-## 6. Interactive Web Visualizer
+## 6. Bulk Import Usage & Formats
 
-To visually inspect the append-only log, RAM index, compaction, and crash recoveries in your browser:
+Use `kvdb import <path> <file>` to stream data into the store in atomic batches.
 
 ```bash
-go run ./cmd/ui -addr 127.0.0.1:8085
+kvdb import <path> <file> [--format lines|csv|jsonl] [--chunk N] [--max-bytes N] [--on-error skip|abort] [--start-line L]
 ```
-Open **[http://127.0.0.1:8085](http://127.0.0.1:8085)**.
+
+### Sample Files
+
+#### Lines Format (`sample.lines`)
+```text
+put user:1 Alice
+put user:2 Bob
+del user:1
+put user:3 Charlie
+```
+
+#### CSV Format (`sample.csv`)
+```csv
+user:4,David
+user:5,Eve
+user:6,"Frank, Jr."
+```
+
+#### JSONL Format (`sample.jsonl`)
+```json
+{"key":"user:7","value":"Grace"}
+{"key":"user:8","value":"Heidi"}
+{"key":"user:4","op":"del"}
+```
+
+---
+
+## 7. Interactive Web Visualizer
+
+To visually inspect the append-only log, RAM index, bulk import streaming, compaction, and crash recoveries in your browser:
+
+```bash
+go run ./cmd/ui -addr 127.0.0.1:8080
+```
+Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)**.
