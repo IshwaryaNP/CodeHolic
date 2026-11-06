@@ -130,9 +130,14 @@ func DecodeHeader(hdr []byte) (Header, error) {
 		return Header{}, fmt.Errorf("%w: TotalLen mismatch (got %d, expected %d)", ErrCorrupt, h.TotalLen, expectedTotal)
 	}
 
+	// KeyLen bounds check
+	if h.KeyLen > SpecMaxKeySize {
+		return Header{}, fmt.Errorf("%w: KeyLen %d exceeds SpecMaxKeySize", ErrCorrupt, h.KeyLen)
+	}
+
 	// ValLen bounds check
-	if uint64(h.ValLen) > MaxValueSize {
-		return Header{}, fmt.Errorf("%w: ValLen %d exceeds MaxValueSize", ErrCorrupt, h.ValLen)
+	if uint64(h.ValLen) > SpecMaxValueSize {
+		return Header{}, fmt.Errorf("%w: ValLen %d exceeds SpecMaxValueSize", ErrCorrupt, h.ValLen)
 	}
 
 	// Delete must have ValLen == 0
