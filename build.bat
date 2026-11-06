@@ -17,5 +17,12 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b %ERRORLEVEL%
 )
 
-echo Successfully built kvdb.exe and torture.exe
+echo Building ui.exe...
+go build -o ui.exe ./cmd/ui
+if %ERRORLEVEL% NEQ 0 (
+    echo Failed to build ui.exe
+    exit /b %ERRORLEVEL%
+)
+
+echo Successfully built kvdb.exe, torture.exe, and ui.exe
 
