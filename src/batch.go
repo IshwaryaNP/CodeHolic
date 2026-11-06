@@ -30,15 +30,15 @@ func NewBatch() *Batch {
 }
 
 // Put adds a key-value write operation to the batch.
-// Validates sizes immediately.
+// Validates sizes immediately per spec: key 1-1024 B, value <= 1 MB.
 func (b *Batch) Put(key, val []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	if len(key) > MaxKeySize {
+	if len(key) > SpecMaxKeySize {
 		return ErrKeyTooLarge
 	}
-	if len(val) > MaxValueSize {
+	if len(val) > SpecMaxValueSize {
 		return ErrValueTooLarge
 	}
 
@@ -58,12 +58,12 @@ func (b *Batch) Put(key, val []byte) error {
 }
 
 // Delete adds a key deletion to the batch.
-// Validates sizes immediately.
+// Validates sizes immediately per spec: key 1-1024 B.
 func (b *Batch) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	if len(key) > MaxKeySize {
+	if len(key) > SpecMaxKeySize {
 		return ErrKeyTooLarge
 	}
 
@@ -94,13 +94,18 @@ type itemOffset struct {
 
 // Write atomically commits all buffered batch operations to the database log file.
 // An empty batch is treated as a no-op.
-// It encodes BatchBegin + all records + BatchCommit into ONE contiguous buffer,
-// performs a single file.Write, syncs per SyncPolicy (SyncAlways and SyncOnBatch both sync once),
-// and finally applies mutations to the index in order.
+// It writes BatchBegin + ops + BatchCommit as ONE buffer, ONE Write, ONE Sync.
+// Update the index only after the sync, holding the write lock, so readers see
+// before-or-after, never in between (D4).
+// Enforces limits: key 1-1024 B, value <= 1 MB, batch <= 10,000 ops.
+// Operations in a batch apply strictly in order (e.g. put X then del X => X absent) (B5).
 // Each Put's offset in the index is set to batchStart + running position of THAT record.
 func (db *DB) Write(b *Batch) error {
 	if b == nil || len(b.ops) == 0 {
 		return nil
+	}
+	if len(b.ops) > SpecMaxBatchOps {
+		return ErrBatchTooLarge
 	}
 
 	db.mu.Lock()

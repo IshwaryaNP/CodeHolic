@@ -13,10 +13,10 @@ func (db *DB) Put(key, val []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	if len(key) > MaxKeySize {
+	if len(key) > SpecMaxKeySize {
 		return ErrKeyTooLarge
 	}
-	if len(val) > MaxValueSize {
+	if len(val) > SpecMaxValueSize {
 		return ErrValueTooLarge
 	}
 
@@ -76,7 +76,7 @@ func (db *DB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	if len(key) > MaxKeySize {
+	if len(key) > SpecMaxKeySize {
 		return ErrKeyTooLarge
 	}
 
@@ -135,7 +135,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, ErrEmptyKey
 	}
-	if len(key) > MaxKeySize {
+	if len(key) > SpecMaxKeySize {
 		return nil, ErrKeyTooLarge
 	}
 

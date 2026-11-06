@@ -34,6 +34,11 @@ const (
 
 	// MaxValueSize is the maximum permitted value size in bytes (64MB).
 	MaxValueSize = 64 * 1024 * 1024
+
+	// Spec limits for operations and batches
+	SpecMaxKeySize   = 1024            // 1-1024 B
+	SpecMaxValueSize = 1 * 1024 * 1024 // <= 1 MB
+	SpecMaxBatchOps  = 10000           // <= 10,000 ops
 )
 
 // Header represents the decoded fixed-size metadata of a log record.
