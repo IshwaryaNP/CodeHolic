@@ -80,7 +80,7 @@ func (o *Oracle) Snapshot() map[string]string {
 func main() {
 	iterations := flag.Int("iterations", 500, "number of kill/restart iterations")
 	seed := flag.Int64("seed", 0, "random seed (mandatory for reproducibility)")
-	mode := flag.String("mode", "default", "mode: default | large-values | compaction | recovery-crash | large-batches")
+	mode := flag.String("mode", "default", "mode: default | large-values | compaction | recovery-crash | large-batches | disk-full | bulk-import")
 	dbPath := flag.String("db", "", "path to test db")
 	kvdbBin := flag.String("kvdb", "./kvdb.exe", "path to kvdb binary")
 	flag.Parse()
@@ -116,7 +116,12 @@ func main() {
 	passed := 0
 	for iter := 1; iter <= cfg.Iterations; iter++ {
 		iterSeed := r.Int63()
-		err := runIteration(iter, iterSeed, cfg, oracle)
+		var err error
+		if cfg.Mode == "bulk-import" {
+			err = runBulkImportIteration(iter, iterSeed, cfg)
+		} else {
+			err = runIteration(iter, iterSeed, cfg, oracle)
+		}
 		if err != nil {
 			fmt.Printf("\n[FAILURE] Iteration %d failed with seed %d: %v\n", iter, cfg.Seed, err)
 			os.Exit(1)
@@ -133,7 +138,13 @@ func main() {
 func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 	r := rand.New(rand.NewSource(seed))
 
-	cmd := exec.Command(cfg.KVDBPath, "serve", cfg.Path)
+	serveArgs := []string{"serve"}
+	if cfg.Mode == "disk-full" {
+		serveArgs = append(serveArgs, "--max-bytes", "131072") // 128 KB
+	}
+	serveArgs = append(serveArgs, cfg.Path)
+
+	cmd := exec.Command(cfg.KVDBPath, serveArgs...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe error: %w", err)
@@ -156,7 +167,7 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 
 	// inFlight tracks operations sent to kvdb that have not yet had their ACK processed
 	var inFlightMu sync.Mutex
-	inFlight := make(map[string]string) // key -> value attempted
+	inFlight := make(map[string]map[string]bool) // key -> set of values attempted and in flight
 
 	stopWriters := make(chan struct{})
 
@@ -182,10 +193,16 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 				inFlightMu.Lock()
 				if req.isBatch {
 					for bk, bv := range req.batchMap {
-						inFlight[bk] = bv
+						if inFlight[bk] == nil {
+							inFlight[bk] = make(map[string]bool)
+						}
+						inFlight[bk][bv] = true
 					}
 				} else {
-					inFlight[req.key] = req.val
+					if inFlight[req.key] == nil {
+						inFlight[req.key] = make(map[string]bool)
+					}
+					inFlight[req.key][req.val] = true
 				}
 				inFlightMu.Unlock()
 
@@ -204,11 +221,17 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 						inFlightMu.Lock()
 						if req.isBatch {
 							for bk, bv := range req.batchMap {
-								delete(inFlight, bk)
+								delete(inFlight[bk], bv)
+								if len(inFlight[bk]) == 0 {
+									delete(inFlight, bk)
+								}
 								oracle.ApplyACK(bk, bv)
 							}
 						} else {
-							delete(inFlight, req.key)
+							delete(inFlight[req.key], req.val)
+							if len(inFlight[req.key]) == 0 {
+								delete(inFlight, req.key)
+							}
 							oracle.ApplyACK(req.key, req.val)
 						}
 						inFlightMu.Unlock()
@@ -293,6 +316,7 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 						req.line = fmt.Sprintf("%s del %s\n", opID, key)
 						req.key = key
 						req.val = ""
+						oracle.RegisterAttempt(key, "")
 					}
 				}
 
@@ -373,11 +397,14 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 		}
 	}
 
-	// Rule 1: Every ACKed operation must survive unless overwritten by an in-flight operation
+	// Rule 1: Every ACKed operation must survive unless overwritten by a later valid attempt
 	inFlightMu.Lock()
-	inFlightCopy := make(map[string]string, len(inFlight))
-	for k, v := range inFlight {
-		inFlightCopy[k] = v
+	inFlightCopy := make(map[string]map[string]bool, len(inFlight))
+	for k, vSet := range inFlight {
+		inFlightCopy[k] = make(map[string]bool, len(vSet))
+		for v := range vSet {
+			inFlightCopy[k][v] = true
+		}
 	}
 	inFlightMu.Unlock()
 
@@ -385,13 +412,143 @@ func runIteration(iter int, seed int64, cfg Config, oracle *Oracle) error {
 	for expK, expV := range acked {
 		actV, ok := actual[expK]
 		if !ok {
-			if inflightVal, hasInFlight := inFlightCopy[expK]; !hasInFlight || inflightVal != "" {
+			if vSet, hasInFlight := inFlightCopy[expK]; (!hasInFlight || !vSet[""]) && !oracle.IsValidValue(expK, "") {
 				return fmt.Errorf("durability violation (Rule 1): ACKed key '%s' is missing from database", expK)
 			}
 		} else if actV != expV {
-			if inflightVal, hasInFlight := inFlightCopy[expK]; !hasInFlight || inflightVal != actV {
+			if vSet, hasInFlight := inFlightCopy[expK]; (!hasInFlight || !vSet[actV]) && !oracle.IsValidValue(expK, actV) {
 				return fmt.Errorf("durability violation (Rule 1): ACKed key '%s' holds '%s', expected '%s'", expK, actV, expV)
 			}
+		}
+	}
+
+	return nil
+}
+
+func runBulkImportIteration(iter int, seed int64, cfg Config) error {
+	r := rand.New(rand.NewSource(seed))
+
+	// Ensure a clean test DB per iteration so keys count starts at 0
+	iterDBPath := fmt.Sprintf("%s.iter_%d", cfg.Path, iter)
+	defer os.Remove(iterDBPath)
+
+	// 1. Generate an import file with seeded operations
+	tmpFile, err := os.CreateTemp("", "torture_import_*.txt")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpFile.Name())
+
+	totalOps := 200 + r.Intn(300)
+	chunkSize := 50
+	expectedKeys := make([]string, 0, totalOps)
+	expectedMap := make(map[string]string)
+
+	for i := 0; i < totalOps; i++ {
+		k := fmt.Sprintf("imp_k_%d_%04d", iter, i)
+		v := fmt.Sprintf("imp_v_%d_%04d", iter, i)
+		fmt.Fprintf(tmpFile, "put %s %s\n", k, v)
+		expectedKeys = append(expectedKeys, k)
+		expectedMap[k] = v
+	}
+	tmpFile.Close()
+
+	// 2. Launch kvdb import asynchronously and SIGKILL at random ms
+	importCmd := exec.Command(cfg.KVDBPath, "import", iterDBPath, tmpFile.Name(), "--chunk", fmt.Sprintf("%d", chunkSize))
+	stdout, err := importCmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := importCmd.Start(); err != nil {
+		return err
+	}
+
+	lastAckedLine := 0
+	_ = lastAckedLine
+	scanner := bufio.NewScanner(stdout)
+	doneChan := make(chan struct{})
+
+	go func() {
+		for scanner.Scan() {
+			txt := scanner.Text()
+			if strings.HasPrefix(txt, "ACK chunk") {
+				var chunkIdx, opsInChunk, totalCommitted, lastLine int
+				_, _ = fmt.Sscanf(txt, "ACK chunk %d ops=%d total=%d last_line=%d", &chunkIdx, &opsInChunk, &totalCommitted, &lastLine)
+				if lastLine > 0 {
+					lastAckedLine = lastLine
+				}
+			}
+		}
+		close(doneChan)
+	}()
+
+	// Random ms kill delay (0 to 15ms)
+	killDelay := time.Duration(r.Intn(15)) * time.Millisecond
+	time.Sleep(killDelay)
+
+	if importCmd.Process != nil {
+		_ = importCmd.Process.Kill()
+		_ = importCmd.Wait()
+	}
+	<-doneChan
+
+	// 3. Reopen and verify integrity
+	outCheck, err := exec.Command(cfg.KVDBPath, "check", iterDBPath).CombinedOutput()
+	if err != nil || !strings.Contains(string(outCheck), "OK") {
+		return fmt.Errorf("check failed after killed import: %v, out: %s", err, string(outCheck))
+	}
+
+	// Dump visible keys
+	outDump, err := exec.Command(cfg.KVDBPath, "dump", iterDBPath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("dump failed after killed import: %v, out: %s", err, string(outDump))
+	}
+
+	actual := make(map[string]string)
+	dumpScanner := bufio.NewScanner(strings.NewReader(string(outDump)))
+	for dumpScanner.Scan() {
+		parts := strings.SplitN(dumpScanner.Text(), "=", 2)
+		if len(parts) == 2 {
+			actual[parts[0]] = parts[1]
+		}
+	}
+
+	// Verify only whole chunks are present (or all keys if whole file finished)
+	if len(actual) != totalOps && len(actual)%chunkSize != 0 {
+		return fmt.Errorf("batch atomicity violation: visible keys count %d is not a multiple of chunkSize %d (total: %d)", len(actual), chunkSize, totalOps)
+	}
+
+	// 4. Resume import with --start-line and verify complete dataset
+	resumeLine := len(actual) + 1
+	outResume, err := exec.Command(cfg.KVDBPath, "import", iterDBPath, tmpFile.Name(), "--chunk", fmt.Sprintf("%d", chunkSize), "--start-line", fmt.Sprintf("%d", resumeLine)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("resumed import failed: %v, out: %s", err, string(outResume))
+	}
+
+	// Check OK again
+	outCheckFinal, err := exec.Command(cfg.KVDBPath, "check", iterDBPath).CombinedOutput()
+	if err != nil || !strings.Contains(string(outCheckFinal), "OK") {
+		return fmt.Errorf("check failed after resumed import: %v, out: %s", err, string(outCheckFinal))
+	}
+
+	// Verify all keys match oracle
+	outDumpFinal, err := exec.Command(cfg.KVDBPath, "dump", iterDBPath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("final dump failed: %v, out: %s", err, string(outDumpFinal))
+	}
+
+	actualFinal := make(map[string]string)
+	finalScanner := bufio.NewScanner(strings.NewReader(string(outDumpFinal)))
+	for finalScanner.Scan() {
+		parts := strings.SplitN(finalScanner.Text(), "=", 2)
+		if len(parts) == 2 {
+			actualFinal[parts[0]] = parts[1]
+		}
+	}
+
+	for expK, expV := range expectedMap {
+		if actV, ok := actualFinal[expK]; !ok || actV != expV {
+			return fmt.Errorf("resumed dataset mismatch: key %s expected %s got %s", expK, expV, actV)
 		}
 	}
 
