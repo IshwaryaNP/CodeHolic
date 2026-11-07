@@ -55,7 +55,7 @@ func (db *DB) Put(key, val []byte) error {
 	db.encBuf = db.encBuf[:0]
 	db.encBuf = EncodeRecord(db.encBuf, OpPut, key, val)
 
-	n, err := db.file.Write(db.encBuf)
+	n, err := db.file.WriteAt(db.encBuf, writeOffsetBefore)
 	if err != nil || n != len(db.encBuf) {
 		db.handleWriteFailure(writeOffsetBefore)
 		if err != nil {
@@ -126,7 +126,7 @@ func (db *DB) Delete(key []byte) error {
 	db.encBuf = db.encBuf[:0]
 	db.encBuf = EncodeRecord(db.encBuf, OpDelete, key, nil)
 
-	n, err := db.file.Write(db.encBuf)
+	n, err := db.file.WriteAt(db.encBuf, writeOffsetBefore)
 	if err != nil || n != len(db.encBuf) {
 		db.handleWriteFailure(writeOffsetBefore)
 		if err != nil {

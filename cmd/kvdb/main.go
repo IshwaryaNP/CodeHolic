@@ -380,16 +380,14 @@ func ioReadFull(r *bufio.Reader, buf []byte) (int, error) {
 	return total, nil
 }
 
-// decodeHexParam decodes a strictly hex-encoded parameter or falls back if plain,
-// returning an error if explicitly requested or handling invalid hex.
+// decodeHexParam decodes a strictly hex-encoded parameter.
+// If s is "-", it represents an empty byte slice ([]byte{}).
+// If hex decoding fails, an error is returned.
 func decodeHexParam(s string) ([]byte, error) {
-	// If hex decode succeeds, return binary
-	b, err := hex.DecodeString(s)
-	if err == nil {
-		return b, nil
+	if s == "-" {
+		return []byte{}, nil
 	}
-	// Fallback to raw string bytes if not hex
-	return []byte(s), nil
+	return hex.DecodeString(s)
 }
 
 func handleServe(args []string) {
@@ -437,6 +435,9 @@ func handleServe(args []string) {
 
 	var wg sync.WaitGroup
 
+	// Note on concurrency: Operations in serve are dispatched concurrently into their own goroutines.
+	// Ordering between single operations is only guaranteed by waiting for the newline-terminated ACK
+	// before issuing dependent operations. Batch ops remain atomic and sequentially framed.
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -550,8 +551,18 @@ func handleServe(args []string) {
 							buildErr = true
 							break
 						}
-						bk, _ := decodeHexParam(opParts[1])
-						bv, _ := decodeHexParam(opParts[2])
+						bk, errK := decodeHexParam(opParts[1])
+						if errK != nil {
+							printERR(opID, fmt.Sprintf("bad batch key hex: %v", errK))
+							buildErr = true
+							break
+						}
+						bv, errV := decodeHexParam(opParts[2])
+						if errV != nil {
+							printERR(opID, fmt.Sprintf("bad batch value hex: %v", errV))
+							buildErr = true
+							break
+						}
 						if err := b.Put(bk, bv); err != nil {
 							printERR(opID, err.Error())
 							buildErr = true
@@ -563,7 +574,12 @@ func handleServe(args []string) {
 							buildErr = true
 							break
 						}
-						bk, _ := decodeHexParam(opParts[1])
+						bk, errK := decodeHexParam(opParts[1])
+						if errK != nil {
+							printERR(opID, fmt.Sprintf("bad batch del key hex: %v", errK))
+							buildErr = true
+							break
+						}
 						if err := b.Delete(bk); err != nil {
 							printERR(opID, err.Error())
 							buildErr = true
@@ -641,6 +657,10 @@ func handleServe(args []string) {
 		default:
 			printERR(opID, fmt.Sprintf("unknown op %s", op))
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		printERR("0", fmt.Sprintf("scanner error: %v", err))
 	}
 
 	wg.Wait()

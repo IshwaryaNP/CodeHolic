@@ -185,8 +185,8 @@ func (db *DB) Write(b *Batch) error {
 		return ErrBatchTooLarge
 	}
 
-	// Single atomic write to disk
-	n, err := db.file.Write(db.encBuf)
+	// Single atomic write to disk at tracked writeOffset
+	n, err := db.file.WriteAt(db.encBuf, writeOffsetBefore)
 	if err != nil || n != len(db.encBuf) {
 		db.handleWriteFailure(writeOffsetBefore)
 		if err != nil {

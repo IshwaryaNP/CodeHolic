@@ -10,6 +10,7 @@ import (
 // *os.File satisfies it, and tests can inject mock wrappers.
 type dbFile interface {
 	Write([]byte) (int, error)
+	WriteAt([]byte, int64) (int, error)
 	ReadAt([]byte, int64) (int, error)
 	Sync() error
 	Truncate(int64) error
@@ -81,7 +82,7 @@ func Open(path string, opts *Options) (*DB, error) {
 		return nil, fmt.Errorf("recovery failed: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}

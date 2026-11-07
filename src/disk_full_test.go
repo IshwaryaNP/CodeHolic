@@ -182,7 +182,9 @@ func TestPhase3_E3_AtCapProcessKillAndReopen(t *testing.T) {
 		opID := fmt.Sprintf("op_%d", i)
 		k := fmt.Sprintf("k%d", i)
 		v := fmt.Sprintf("val%d", i)
-		_, _ = writer.WriteString(fmt.Sprintf("%s put %s %s\n", opID, k, v))
+		kHex := fmt.Sprintf("%x", k)
+		vHex := fmt.Sprintf("%x", v)
+		_, _ = writer.WriteString(fmt.Sprintf("%s put %s %s\n", opID, kHex, vHex))
 		_ = writer.Flush()
 
 		if scanner.Scan() {

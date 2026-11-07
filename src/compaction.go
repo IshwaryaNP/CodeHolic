@@ -24,6 +24,7 @@ type compactor struct {
 	beforeRename func() error
 	afterRename  func() error
 	beforeReopen func() error
+	afterCompaction func()
 }
 
 type liveEntry struct {
@@ -203,7 +204,7 @@ func (c *compactor) runLocked() error {
 	if c.beforeRename != nil {
 		if err := c.beforeRename(); err != nil {
 			// Hook error: reopen original file and return error
-			newOrigFile, openErr := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
+			newOrigFile, openErr := os.OpenFile(c.db.path, os.O_RDWR, 0666)
 			if openErr != nil {
 				c.db.broken = true
 				return fmt.Errorf("%w: rename hook failed and failed reopening original file: %v", ErrCompactionFatal, openErr)
@@ -216,7 +217,7 @@ func (c *compactor) runLocked() error {
 	// Atomic rename
 	if err := os.Rename(tmpPath, c.db.path); err != nil {
 		// Rename failed: attempt reopening original file to keep DB functional
-		newOrigFile, openErr := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
+		newOrigFile, openErr := os.OpenFile(c.db.path, os.O_RDWR, 0666)
 		if openErr != nil {
 			c.db.broken = true
 			return fmt.Errorf("%w: rename failed (%v) and failed reopening original file (%v)", ErrCompactionFatal, err, openErr)
@@ -234,7 +235,7 @@ func (c *compactor) runLocked() error {
 			c.db.index.Replace(newMap)
 			c.db.writeOffset = newOffset
 			// Try to reopen authoritative file
-			newF, openErr := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
+			newF, openErr := os.OpenFile(c.db.path, os.O_RDWR, 0666)
 			if openErr != nil {
 				c.db.broken = true
 				return fmt.Errorf("%w: afterRename hook failed and reopening new file failed: %v", ErrCompactionFatal, openErr)
@@ -262,7 +263,7 @@ func (c *compactor) runLocked() error {
 	}
 
 	// Reopen the newly compacted db.path
-	newF, err := os.OpenFile(c.db.path, os.O_RDWR|os.O_APPEND, 0666)
+	newF, err := os.OpenFile(c.db.path, os.O_RDWR, 0666)
 	if err != nil {
 		// Rename succeeded: swap in-memory index/offset, but mark DB broken since file handle failed
 		c.db.index.Replace(newMap)
@@ -275,6 +276,10 @@ func (c *compactor) runLocked() error {
 	c.db.file = newF
 	c.db.index.Replace(newMap)
 	c.db.writeOffset = newOffset
+
+	if c.afterCompaction != nil {
+		c.afterCompaction()
+	}
 
 	return nil
 }

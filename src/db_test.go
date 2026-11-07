@@ -426,6 +426,22 @@ func (m *mockFailingFile) Write(p []byte) (int, error) {
 	return m.realFile.Write(p)
 }
 
+func (m *mockFailingFile) WriteAt(p []byte, off int64) (int, error) {
+	if m.failWriteActive {
+		if m.failWriteAfterN > 0 {
+			toWrite := m.failWriteAfterN
+			if toWrite > len(p) {
+				toWrite = len(p)
+			}
+			n, _ := m.realFile.WriteAt(p[:toWrite], off)
+			m.failWriteAfterN = 0
+			return n, errors.New("simulated short write / disk full")
+		}
+		return 0, errors.New("simulated write failure")
+	}
+	return m.realFile.WriteAt(p, off)
+}
+
 func (m *mockFailingFile) ReadAt(p []byte, off int64) (int, error) {
 	return m.realFile.ReadAt(p, off)
 }

@@ -46,8 +46,12 @@ All 8 mandatory CLI commands are supported:
 ./kvdb check ./data.db
 
 # 8. Long-running serve mode (reads ops from stdin, prints ACK <op-id> after fsync)
-./kvdb serve ./data.db
+./kvdb serve ./data.db [--max-bytes N]
 ```
+
+> **Concurrency & Ordering in `serve`**: Operations read from `stdin` in `serve` are dispatched concurrently into individual worker goroutines. Ordering between single operations is only guaranteed by waiting for the newline-terminated `ACK <id>` before issuing dependent operations. Atomic batches (`batch <n>` or file-based) remain strictly atomic and sequentially framed.
+>
+> **Compaction Temp Files**: The compaction temporary file (`<path>.tmp`) does **NOT** count against `--max-bytes`. `--max-bytes` strictly bounds only the primary active data log.
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -412,5 +413,116 @@ func TestCLI_OutputFormats(t *testing.T) {
 	outCheck, err := exec.Command(binPath, "check", dbPath).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(outCheck)) != "OK" {
 		t.Fatalf("check failed: %v, out: %s", err, string(outCheck))
+	}
+}
+
+// TestCLI_ServeEmptyValue_BadHexBatch_1MBRoundTrip tests the Phase 3 user requests:
+// 1. Empty values: "-" token means empty value in put and batch; round-trips through serve and reopen.
+// 2. Batch with bad hex applies nothing.
+// 3. 1 MB value (2 MB hex line) round-trips.
+func TestCLI_ServeEmptyValue_BadHexBatch_1MBRoundTrip(t *testing.T) {
+	binPath := buildKVDBBinary(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "serve_protocol_test.db")
+
+	cmd := exec.Command(binPath, "serve", dbPath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd start: %v", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	writer := bufio.NewWriter(stdin)
+
+	send := func(line string) {
+		_, _ = writer.WriteString(line + "\n")
+		_ = writer.Flush()
+	}
+
+	recv := func() string {
+		if scanner.Scan() {
+			return scanner.Text()
+		}
+		return ""
+	}
+
+	// 1. Test empty value via "-"
+	send("op_empty put 656d7074795f6b6579 -")
+	resp := recv()
+	if resp != "ACK op_empty" {
+		t.Fatalf("Expected 'ACK op_empty', got '%s'", resp)
+	}
+
+	// 2. Test batch with "-" empty value and test batch with bad hex applying nothing
+	// First: batch with empty value
+	send("op_b1 batch 1")
+	send("put 625f656d707479 -")
+	resp = recv()
+	if resp != "ACK op_b1" {
+		t.Fatalf("Expected 'ACK op_b1', got '%s'", resp)
+	}
+
+	// Next: batch with bad hex token. It must return ERR and apply nothing.
+	send("op_bad_b batch 2")
+	send("put 676f6f645f6b 6162")
+	send("put 6261645f6b !!!not_hex!!!")
+	resp = recv()
+	if !strings.HasPrefix(resp, "ERR op_bad_b") {
+		t.Fatalf("Expected 'ERR op_bad_b', got '%s'", resp)
+	}
+
+	// 3. Test 1 MB value (2 MB hex line)
+	bigBytes := bytes.Repeat([]byte{0x42}, 1024*1024) // 1 MB
+	bigHex := hex.EncodeToString(bigBytes)             // 2 MB hex string
+	send(fmt.Sprintf("op_1mb put 6b6579316d62 %s", bigHex))
+	resp = recv()
+	if resp != "ACK op_1mb" {
+		t.Fatalf("Expected 'ACK op_1mb', got '%s'", resp)
+	}
+
+	// Close serve and reopen directly to verify durability and content
+	_ = stdin.Close()
+	_ = cmd.Wait()
+
+	db, err := src.Open(dbPath, src.DefaultOptions())
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify empty value
+	vEmpty, err := db.Get([]byte("empty_key"))
+	if err != nil || len(vEmpty) != 0 {
+		t.Fatalf("empty_key value mismatch: err=%v, len=%d", err, len(vEmpty))
+	}
+	vBEmpty, err := db.Get([]byte("b_empty"))
+	if err != nil || len(vBEmpty) != 0 {
+		t.Fatalf("b_empty value mismatch: err=%v, len=%d", err, len(vBEmpty))
+	}
+
+	// Verify bad hex batch applied NOTHING (good_k must not exist)
+	_, err = db.Get([]byte("good_k"))
+	if !errors.Is(err, src.ErrNotFound) {
+		t.Fatalf("good_k should be NOTFOUND because batch failed, got: %v", err)
+	}
+
+	// Verify 1 MB value
+	v1mb, err := db.Get([]byte("key1mb"))
+	if err != nil || len(v1mb) != 1024*1024 || v1mb[0] != 0x42 {
+		t.Fatalf("1MB value mismatch: err=%v, len=%d", err, len(v1mb))
 	}
 }
