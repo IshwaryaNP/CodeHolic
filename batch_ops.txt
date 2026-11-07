@@ -1,0 +1,3 @@
+put order:1001 "Pending"
+put order:1002 "Shipped"
+del user:101
