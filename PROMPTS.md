@@ -26,7 +26,21 @@ This document contains a chronological record of prompts and technical inquiries
 > "In the torture tool, two concurrent writers caused a false-positive oracle mismatch because one worker's in-flight un-ACKed write was committing after another worker's ACKed write. How should the torture oracle structure in-flight tracking so it strictly enforces the invariant: Rule 1 (every ACKed write survives) and Rule 4 (no unknown values appear)?"
 
 
-### Prompt 8: 2026-11-07 ~01:12 (Gemini 3.8 Flash / Antigravity)
+### Prompt 9: 2026-11-07 ~04:55 (User / Gemini 3.8 Flash / Antigravity)
+> "Audit Phase 0, then Phase 1 batch atomicity tests without changing the on-disk record format. Ensure Begin + N records + Commit design with per-record CRC. Truncate at every byte offset, bit-flip, ordered puts and deletes, 10,000-op batch round-trips, and idempotent double recovery."
+
+### Prompt 10: 2026-11-07 ~05:13 (User / Claude Opus / GPT-OSS / Gemini)
+> "Phase 3 approved with these changes:
+1. Delete: on cap, behave like Put. If writeOffset+recordLen > maxBytes and liveBytes+recordLen <= maxBytes, compactLocked() once and retry once; otherwise return ErrDiskFull. Do NOT bypass the cap.
+2. Compaction trigger test is liveBytes+needed <= maxBytes. Compute liveBytes only on the full path. Exactly one compaction and one retry per operation, never a loop.
+3. Compaction failure handling: before rename succeeds: remove tmp, reopen original file; after rename succeeds: new file is authoritative; if reopen fails either way, mark DB broken.
+4. Name tests by spec ID: E1, E2, E3, E4, E5.
+5. Windows check: test O_RDWR|O_APPEND Truncate on real *os.File. If fails, open without O_APPEND and write with WriteAt.
+6. Serve protocol fixes: '-' is empty value token, bad hex rejects batch entirely, check scanner.Err(), SyncAlways in serve and CLI commands."
+
+### Prompt 11: 2026-11-07 ~05:40 (User)
+> "Run the project and give the commands to run the project."
+
 > "You are working on an existing Go (stdlib only) Bitcask-style KV store in this repo (src/, cmd/kvdb, cmd/torture, cmd/ui, docs: README/ARCHITECTURE/BREAKING/PROMPTS.md). It must satisfy the 'Kill It and Prove It' spec: after kill -9 at any instant, every ACKed op is present, batches are all-or-nothing, no garbage values, open() always succeeds, recovery <2s at 1M keys. First READ the code, then work through the steps below in order. Do not rewrite working parts. After each step run `go test -race ./...` and make a separate commit with a meaningful message. Do not use any third-party libraries.
 1. DISK FULL: add max_bytes to Open() and `kvdb open|serve --max-bytes N`. Before any append, if size+record > cap, return a clear ErrDiskFull without writing. Reserve headroom so deletes and compaction still work at the cap (E5 must recover without manual intervention). Batches check total size up front (E2).
 2. WRITE ROLLBACK: on any write/sync error in a live process, Truncate the file back to the pre-write offset and fsync, so no orphan BatchBegin or partial record remains. Add a test that injects a write error mid-batch.

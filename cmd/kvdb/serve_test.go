@@ -16,13 +16,32 @@ import (
 	"bitcask/src"
 )
 
+var (
+	sharedKVDBBin     string
+	sharedKVDBOnce    sync.Once
+	sharedKVDBBuildErr error
+)
+
 func buildKVDBBinary(t *testing.T) string {
-	binPath := filepath.Join(t.TempDir(), "kvdb_test.exe")
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build kvdb failed: %v, out: %s", err, string(out))
+	t.Helper()
+	sharedKVDBOnce.Do(func() {
+		binDir, err := os.MkdirTemp("", "kvdb_shared_bin_*")
+		if err != nil {
+			sharedKVDBBuildErr = err
+			return
+		}
+		binPath := filepath.Join(binDir, "kvdb_test.exe")
+		cmd := exec.Command("go", "build", "-o", binPath, ".")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			sharedKVDBBuildErr = fmt.Errorf("build kvdb failed: %v, out: %s", err, string(out))
+			return
+		}
+		sharedKVDBBin = binPath
+	})
+	if sharedKVDBBuildErr != nil {
+		t.Fatalf("buildKVDBBinary failed: %v", sharedKVDBBuildErr)
 	}
-	return binPath
+	return sharedKVDBBin
 }
 
 // TestCLI_ServeProtocolAndAtomicity tests that:
